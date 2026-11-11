@@ -697,12 +697,28 @@ if (typeof module !== 'undefined' && module.exports) {
    printouts on their tabs instead. True separate dept accounts need a
    backend and are a v2 item (see README).
    ===================================================================== */
-var TABS = [
-  ['dashboard', 'Dashboard'], ['budget', 'Budget'], ['rates', 'Union Rates'],
-  ['actuals', 'Actuals & Left'], ['script', 'Script & Coverage'], ['schedule', 'Schedule'],
-  ['visual', 'Visual Prep'], ['scenes', 'Scene Pages'], ['props', 'Props & Sets'],
-  ['crew', 'Crew & Call Sheets'], ['financing', 'Financing & Bonds'], ['settings', 'Settings & Export']
+/* Navigation — 6 groups, 13 sections (My Films + the 12 original tabs).
+   No horizontal tab strip: on phone the active group's sections show as a
+   wrapping chip row under a 6-button group grid; on desktop the nav is a
+   sidebar with every group expanded. Every section is one tap away, no
+   sideways scrolling, no truncated labels, and the active section always
+   stays visible. */
+var GROUPS = [
+  { id: 'library', label: 'Films', sections: [['films', 'My Films'], ['dashboard', 'Overview']] },
+  { id: 'money', label: 'Money', sections: [['budget', 'Budget'], ['rates', 'Union Rates'], ['actuals', 'Actuals & Left'], ['financing', 'Financing & Bonds']] },
+  { id: 'script', label: 'Script', sections: [['script', 'Script & Coverage'], ['scenes', 'Scene Pages']] },
+  { id: 'schedule', label: 'Schedule', sections: [['schedule', 'Schedule']] },
+  { id: 'production', label: 'Production', sections: [['visual', 'Visual Prep'], ['props', 'Props & Sets'], ['crew', 'Crew & Call Sheets']] },
+  { id: 'settings', label: 'Settings', sections: [['settings', 'Settings & Export']] }
 ];
+var TABS = GROUPS.reduce(function (all, g) { return all.concat(g.sections); }, []);
+function groupOf(tab) {
+  for (var i = 0; i < GROUPS.length; i++) {
+    if (GROUPS[i].sections.some(function (s) { return s[0] === tab; })) return GROUPS[i].id;
+  }
+  return 'library';
+}
+var currentGroup = 'library';
 function $(id) { return document.getElementById(id); }
 function h(html) { return html; }
 function download(filename, text, mime) {
@@ -711,17 +727,25 @@ function download(filename, text, mime) {
   a.href = URL.createObjectURL(blob); a.download = filename; a.click();
   setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
 }
-function setTab(t) { currentTab = t; renderAll(); }
-function renderTabs() {
-  $('tabs').innerHTML = TABS.map(function (t) {
-    return '<button type="button" data-action="tab" data-tab="' + t[0] + '" class="' + (currentTab === t[0] ? 'active' : '') + '">' + t[1] + '</button>';
+function setTab(t) { currentTab = t; currentGroup = groupOf(t); renderAll(); }
+function setGroup(g) { currentGroup = g; renderNav(); }
+function renderNav() {
+  var nav = $('nav'); if (!nav) return;
+  nav.innerHTML = GROUPS.map(function (g) {
+    var sections = g.sections.map(function (t) {
+      return '<button type="button" data-action="tab" data-tab="' + t[0] + '" class="nav-section' + (currentTab === t[0] ? ' active' : '') + '" aria-current="' + (currentTab === t[0] ? 'page' : 'false') + '">' + t[1] + '</button>';
+    }).join('');
+    return '<div class="nav-group' + (currentGroup === g.id ? ' open' : '') + '" data-group="' + g.id + '">' +
+      '<button type="button" class="nav-group-label" data-action="group" data-group="' + g.id + '" aria-expanded="' + (currentGroup === g.id) + '">' + g.label + '</button>' +
+      '<div class="nav-sections">' + sections + '</div></div>';
   }).join('');
 }
 function renderAll() {
-  renderTabs();
+  renderNav();
   var p = currentProject();
   var v = $('view');
-  if (!p) { v.innerHTML = viewHome(); return; }
+  if (!p) { v.innerHTML = emptyStateFor(currentTab); return; }
+  if (currentTab === 'films') { v.innerHTML = viewFilms(); renderCloudAuth(); return; }
   var fn = { dashboard: viewDashboard, budget: viewBudget, rates: viewRates, actuals: viewActuals, script: viewScript, schedule: viewSchedule, visual: viewVisual, scenes: viewScenes, props: viewProps, crew: viewCrew, financing: viewFinancing, settings: viewSettings }[currentTab] || viewDashboard;
   v.innerHTML = fn(p);
   renderCloudAuth();
@@ -733,34 +757,95 @@ function projectCard(p) {
     '<button type="button" class="small" data-action="dup-project" data-id="' + p.id + '">Duplicate</button>' +
     '<button type="button" class="small ghost" data-action="del-project" data-id="' + p.id + '">Delete</button></div></div>';
 }
-function viewHome() {
-  var cards = DB.projects.map(projectCard).join('') || '<p class="muted">No projects yet — start one below. Projects are shared: Gabe and Amelia see the same list.</p>';
-  return '<div class="card"><h2>My Films</h2><p class="sub">Shared library — Gabe &amp; Amelia see and edit the same projects. Last save wins if you both edit at once, so don’t type in the same project at the same time.</p>' +
-    '<div class="btnrow"><button type="button" class="small primary" data-action="new-project" data-template="feature">＋ New Feature</button>' +
-    '<button type="button" class="small" data-action="new-project" data-template="short">＋ New Short</button>' +
-    '<button type="button" class="small" data-action="new-project" data-template="commercial">＋ New Commercial</button>' +
-    '<button type="button" class="small" data-action="new-project" data-template="blank">＋ Blank</button></div>' +
-    '<div class="card"><h3>☁️ Cloud sync — shared</h3><p class="muted">Sign in to back up the shared library to the cloud and use it on phone and laptop. Email confirmation is on — check your inbox for the confirmation link after signing up.</p>' +
+function newProjectButtons() {
+  return '<div class="btnrow"><button type="button" class="primary" data-action="new-project" data-template="feature">+ New Feature</button>' +
+    '<button type="button" data-action="new-project" data-template="short">+ New Short</button>' +
+    '<button type="button" data-action="new-project" data-template="commercial">+ New Commercial</button>' +
+    '<button type="button" data-action="new-project" data-template="blank">+ Blank</button></div>';
+}
+function cloudSyncHTML() {
+  return '<div class="card"><h3>Cloud sync — shared</h3><p class="muted">Sign in to back up the shared library to the cloud and use it on phone and laptop. Email confirmation is on — check your inbox for the confirmation link after signing up.</p>' +
     '<p id="cloud-status" class="saved"></p>' +
     '<div id="cloud-signed-out"><label>Email<input type="email" id="cloud-email" autocomplete="email" placeholder="you@example.com"></label>' +
     '<label>Password<input type="password" id="cloud-password" autocomplete="current-password" placeholder="Your password"></label>' +
-    '<div class="btnrow"><button type="button" class="small primary" id="btn-cloud-signin">Sign in</button>' +
-    '<button type="button" class="small" id="btn-cloud-signup">Sign up</button></div>' +
+    '<div class="btnrow"><button type="button" class="primary" id="btn-cloud-signin">Sign in</button>' +
+    '<button type="button" id="btn-cloud-signup">Sign up</button></div>' +
     '<p class="muted" id="cloud-auth-msg"></p></div>' +
     '<div id="cloud-signed-in" hidden><p>Signed in as <b id="cloud-email-shown"></b> — shared library</p>' +
-    '<div class="btnrow"><button type="button" class="small" id="btn-cloud-sync">↻ Sync now</button>' +
-    '<button type="button" class="small ghost" id="btn-cloud-signout">Sign out</button></div>' +
+    '<div class="btnrow"><button type="button" id="btn-cloud-sync">Sync now</button>' +
+    '<button type="button" class="ghost" id="btn-cloud-signout">Sign out</button></div>' +
     '<p class="muted">Signing out clears the shared library from this device (it stays in the cloud). The next person to sign in here pulls it fresh — they never inherit your on-screen copy.</p></div>' +
     '<div id="cloud-conflict" hidden><p><b>Cloud and this device both have projects — pick which one to keep.</b></p><p id="cloud-conflict-text" class="muted"></p>' +
-    '<div class="btnrow"><button type="button" class="small primary" id="btn-cloud-keep-local">Keep this device</button>' +
-    '<button type="button" class="small" id="btn-cloud-use-cloud">Use cloud copy</button></div></div>' +
+    '<div class="btnrow"><button type="button" class="primary" id="btn-cloud-keep-local">Keep this device</button>' +
+    '<button type="button" id="btn-cloud-use-cloud">Use cloud copy</button></div></div>' +
     '<div id="cloud-claim" hidden><p><b>This device already has projects saved while signed out — are they yours?</b></p><p id="cloud-claim-text" class="muted"></p>' +
-    '<div class="btnrow"><button type="button" class="small primary" id="btn-cloud-claim-yes">Yes — upload them to the shared library</button>' +
-    '<button type="button" class="small" id="btn-cloud-claim-no">No — start from the cloud copy</button></div>' +
-    '<p class="muted">If you pick No, those projects stay saved on this device under a backup — nothing is deleted.</p></div></div>' +
-    '<div class="btnrow"><button type="button" class="small" data-action="export-json">⬇ Export backup (JSON)</button>' +
-    '<button type="button" class="small" data-action="import-json">⬆ Import backup</button><input type="file" id="import-file" accept=".json,application/json" hidden></div>' +
-    '</div>' + cards;
+    '<div class="btnrow"><button type="button" class="primary" id="btn-cloud-claim-yes">Yes — upload them to the shared library</button>' +
+    '<button type="button" id="btn-cloud-claim-no">No — start from the cloud copy</button></div>' +
+    '<p class="muted">If you pick No, those projects stay saved on this device under a backup — nothing is deleted.</p></div></div>';
+}
+function backupButtonsHTML() {
+  return '<div class="card"><h3>Backup</h3><p class="muted">Your library is also yours as a file — export it any time and keep a copy somewhere safe.</p>' +
+    '<div class="btnrow"><button type="button" data-action="export-json">Export backup (JSON)</button>' +
+    '<button type="button" data-action="import-json">Import backup</button><input type="file" id="import-file" accept=".json,application/json" hidden></div></div>';
+}
+/* My Films — the library. The "no films yet" line sits ABOVE the actions,
+   inside the card, and the project list follows them. */
+function viewFilms() {
+  var cards = DB.projects.map(projectCard).join('');
+  var empty = DB.projects.length === 0;
+  return '<div class="card"><h2>My Films</h2><p class="sub">Shared library — Gabe &amp; Amelia see and edit the same projects. Last save wins if you both edit at once, so don’t type in the same project at the same time.</p>' +
+    (empty ? '<p class="muted">No films yet — start your first one below.</p>' : '') +
+    newProjectButtons() + cards + '</div>' + cloudSyncHTML() + backupButtonsHTML();
+}
+/* Per-section empty states — shown when the library has no project yet.
+   Every section gets its own title, one sentence about what it does, and
+   the single action to get started. The Overview tab is a real onboarding
+   screen, not a bare list. */
+var EMPTY_STATES = {
+  films: { title: 'My Films', body: 'Your films live here. Start one and everything — budget, schedule, script, crew — hangs off it.' },
+  dashboard: { title: 'Overview', body: 'Your film at a glance — budget, spending, cash needed, and what’s due next.' },
+  budget: { title: 'Budget', body: 'Build the budget — topsheet, detail lines, fringes, and globals that reprice everything.' },
+  rates: { title: 'Union Rates', body: 'Current union minimums — SAG, DGA, WGA, IATSE — as a dated 2026–27 snapshot you can edit.' },
+  actuals: { title: 'Actuals & Left', body: 'Track what you’ve actually spent, account by account, against the budget.' },
+  script: { title: 'Script & Coverage', body: 'Break down the script — scenes, characters, locations, and props — and send them to the budget.' },
+  schedule: { title: 'Schedule', body: 'Plan shoot days, build call sheets, and see the Day Out of Days for every cast member.' },
+  visual: { title: 'Visual Prep', body: 'Mood boards, shot lists, and the look for each scene, ready for the DP.' },
+  scenes: { title: 'Scene Pages', body: 'One page per scene, with a section for every department.' },
+  props: { title: 'Props & Sets', body: 'Props and set pieces — when each one is needed, and whether it’s ready.' },
+  crew: { title: 'Crew & Call Sheets', body: 'Crew directory and call sheets, fed by the intake form.' },
+  financing: { title: 'Financing & Bonds', body: 'Where the money comes from, the SAG deposit locked in escrow, and who gets paid back first.' },
+  settings: { title: 'Settings & Export', body: 'Exports, backups, and project settings.' }
+};
+function emptyStateFor(tab) {
+  if (tab === 'films') return viewFilms();
+  if (tab === 'dashboard') return viewOnboarding();
+  var s = EMPTY_STATES[tab] || EMPTY_STATES.dashboard;
+  return '<div class="card empty-state"><div class="empty-mark"><img src="icon.svg" alt="" width="48" height="48"></div>' +
+    '<h2>No film yet — ' + esc(s.title) + '</h2><p class="sub">' + esc(s.body) + '</p>' +
+    '<p class="muted">Create a film to start. It takes one tap, and you can rename it any time.</p>' +
+    newProjectButtons() + '</div>';
+}
+function viewOnboarding() {
+  var groups = GROUPS.filter(function (g) { return g.id !== 'library'; }).map(function (g) {
+    var first = g.sections[0][0];
+    var blurb = {
+      money: 'Budget, union rates, actuals, financing and bonds.',
+      script: 'Script breakdown and one page per scene.',
+      schedule: 'Shoot days, call sheets, Day Out of Days.',
+      production: 'Visual prep, props and set pieces, crew.',
+      settings: 'Exports, backups, and project settings.'
+    }[g.id] || '';
+    return '<button type="button" class="group-row" data-action="goto" data-tab="' + first + '"><span class="group-row-label">' + g.label + '</span><span class="group-row-blurb">' + blurb + '</span><span class="group-row-chev" aria-hidden="true">›</span></button>';
+  }).join('');
+  return '<div class="card hero"><div class="hero-mark"><img src="icon.svg" alt="Filmmaker Dashboard" width="72" height="72"></div>' +
+    '<h2>One film, one place.</h2><p class="sub">Script, budget, schedule and set — from a locked script to the shoot, with the money tracked all the way.</p>' +
+    '<ol class="steps"><li><b>Start a film.</b> Pick a template — Feature, Short, Commercial or Blank.</li>' +
+    '<li><b>Break down the script.</b> Scenes, cast, locations and props feed the budget automatically.</li>' +
+    '<li><b>Budget, schedule, shoot.</b> Shoot days reprice the budget; call sheets and Day Out of Days come from the schedule.</li></ol>' +
+    '<p class="muted">No films yet — start your first one below.</p>' +
+    newProjectButtons() + '</div>' +
+    '<div class="card"><h3>What’s inside</h3><div class="group-list">' + groups + '</div></div>' +
+    cloudSyncHTML() + backupButtonsHTML();
 }
 function renderCloudAuth() {
   var signedIn = !!cloudUser;
@@ -790,7 +875,7 @@ function headerFields(p) {
     DEPTS.map(function (d) { return '<option value="dept:' + d + '"' + (currentRole === 'dept' && currentDept === d ? ' selected' : '') + '>Dept head — ' + d + ' only</option>'; }).join('') +
     '</select> <span class="muted">Dept heads see only their department’s budget lines, inspo, shots, schedule items and scene sections. Use their tab’s export/print for what you send them — don’t share the shared login.</span></p>' +
     '<div class="btnrow"><button type="button" class="small" data-action="back-home">← All films</button>' +
-    '<button type="button" class="small primary" data-action="preview-pdf">👁 Preview / PDF</button>' +
+    '<button type="button" class="small primary" data-action="preview-pdf">Preview / PDF</button>' +
     '<span class="saved" id="saved-note">Saved on this device</span></div></div>';
 }
 function visibleAccounts(p) {
@@ -811,7 +896,7 @@ function viewDashboard(p) {
     kpi('Financing committed', money(fin.committed), money(fin.gap) + ' gap to close') +
     '</div>' +
     '<div class="card"><h3>Producer progress</h3><table>' + rows + '</table></div>' +
-    (propsDue.length ? '<div class="card"><h3>⚠️ Props / set pieces due now</h3><p>' + propsDue.map(function (x) { return esc(x.name) + ' — prep by ' + fmtDate(x.prepBy) + ' (' + esc(x.status) + ')'; }).join('<br>') + '</p></div>' : '') +
+    (propsDue.length ? '<div class="card"><h3>Props / set pieces due now</h3><p>' + propsDue.map(function (x) { return esc(x.name) + ' — prep by ' + fmtDate(x.prepBy) + ' (' + esc(x.status) + ')'; }).join('<br>') + '</p></div>' : '') +
     '<div class="card"><h3>Next shoot day</h3><p>' + nextShootDay(p) + '</p>' +
     '<div class="btnrow"><button type="button" class="small" data-action="goto" data-tab="schedule">Schedule</button>' +
     '<button type="button" class="small" data-action="goto" data-tab="budget">Budget</button>' +
@@ -955,7 +1040,7 @@ function viewSchedule(p) {
       '<p class="muted">Call ' + esc(d.callTime || '—') + (d.location ? ' · ' + esc(d.location) : '') + '</p>' +
       '<p>Scenes: ' + (scs.join(', ') || '—') + '</p>' +
       '<p>Props / set pieces today: ' + (propsToday.map(function (x) { return esc(x.name); }).join(', ') || '—') + '</p>' +
-      '<div class="btnrow"><button type="button" class="small" data-action="call-sheet" data-i="' + i + '">📋 Call sheet</button>' +
+      '<div class="btnrow"><button type="button" class="small" data-action="call-sheet" data-i="' + i + '">Call sheet</button>' +
       '<button type="button" class="small ghost" data-action="del-day" data-i="' + i + '">Remove day</button></div></div>';
   }).join('');
   var doodHead = '<tr><th>Cast</th><th>Days</th>' + days.map(function (d, i) { return '<th>' + (i + 1) + '<br><span class="muted">' + (d.date || '').slice(5) + '</span></th>'; }).join('') + '</tr>';
@@ -1004,7 +1089,7 @@ function callSheetHTML(p, dayIndex) {
     '<h3>Props &amp; set pieces today</h3><p>' + (props.map(function (x) { return esc(x.name) + ' (' + esc(x.status) + ')'; }).join(', ') || '—') + '</p>' +
     '<h3>Notes</h3><p>' + esc(d.notes || '') + '</p>' +
     '<p class="muted">Weather: ________ · Nearest hospital: ________ · Production contact: ________</p>' +
-    '<div class="btnrow noprint"><button type="button" class="small primary" data-action="print-call-sheet">🖨 Print / Save as PDF</button></div></div>';
+    '<div class="btnrow noprint"><button type="button" class="small primary" data-action="print-call-sheet">Print / Save as PDF</button></div></div>';
 }
 
 /* ---------------- Visual Prep / Scenes / Props / Crew ---------------- */
@@ -1078,7 +1163,7 @@ function viewCrew(p) {
     '<label>Allergies / medical notes<input id="crew-notes" placeholder="Anything the set needs to know"></label>' +
     '<label>Address<input id="crew-address"></label>' +
     '<div class="btnrow"><button type="button" class="small primary" data-action="add-crew">＋ Add crew member</button>' +
-    '<button type="button" class="small" data-action="print-intake">🖨 Blank intake form (print / PDF)</button></div>' +
+    '<button type="button" class="small" data-action="print-intake">Blank intake form (print / PDF)</button></div>' +
     '<p class="muted">Intake: crew fill in this same form — on your device, or on a printed copy you type in later. There is no public intake link in v1 (a public form that writes to the shared library needs a backend — see README). Never share the shared sign-in with crew; use the printed intake form or enter their details yourself.</p>' +
     '<table><tr><th>Name</th><th>Role</th><th>Phone</th><th>Email</th><th>Emergency</th><th>Notes</th><th></th></tr>' + rows + '</table></div>';
 }
@@ -1124,11 +1209,11 @@ function viewSettings(p) {
   return headerFields(p) + '<div class="card"><h2>Settings &amp; Export</h2>' +
     '<p class="sub">Exports are honest about what they are: the MMB XML is modeled on Movie Magic Budgeting’s published XML (Advanced) export structure — it is NOT a native .mmb / .mmbx file, which is a closed proprietary format with no public spec. The CSV / TSV carry the same detail lines and can be opened in any spreadsheet.</p>' +
     '<div class="btnrow">' +
-    '<button type="button" class="small primary" data-action="export-mmb-xml">⬇ MMB-style XML</button>' +
-    '<button type="button" class="small" data-action="export-csv">⬇ CSV</button>' +
-    '<button type="button" class="small" data-action="export-tsv">⬇ Tab-delimited</button>' +
-    '<button type="button" class="small" data-action="export-json">⬇ Full backup (JSON)</button>' +
-    '<button type="button" class="small" data-action="preview-pdf">👁 Preview / PDF</button></div>' +
+    '<button type="button" class="small primary" data-action="export-mmb-xml">MMB-style XML</button>' +
+    '<button type="button" class="small" data-action="export-csv">CSV</button>' +
+    '<button type="button" class="small" data-action="export-tsv">Tab-delimited</button>' +
+    '<button type="button" class="small" data-action="export-json">Full backup (JSON)</button>' +
+    '<button type="button" class="small" data-action="preview-pdf">Preview / PDF</button></div>' +
     '<h3>Sharing</h3><p class="muted">Producer (you and Amelia) — full access to every project. Dept heads — in-app role filter on the project header, plus per-dept exports from their tabs. Do not share the shared sign-in with dept heads; send them their filtered export/printout instead. True separate dept-head accounts need a backend and are a v2 item.</p>' +
     '<h3>Locations</h3><div class="btnrow"><input id="loc-name" placeholder="Location name"><input id="loc-incentive" type="number" placeholder="Incentive %"><button type="button" class="small" data-action="add-location">＋ Add location</button></div>' +
     '<p>' + (p.locations || []).map(function (l) { return '<span class="pill">' + esc(l.name) + (l.incentive ? ' — ' + l.incentive + '% incentive' : '') + '</span>'; }).join(' ') + '</p>' +
@@ -1194,12 +1279,13 @@ function handleAction(act, el) {
   var p = currentProject();
   var id = el.getAttribute('data-id');
   if (act === 'tab' || act === 'goto') { setTab(el.getAttribute('data-tab')); return; }
-  if (act === 'back-home') { currentProjectId = null; renderAll(); return; }
+  if (act === 'group') { setGroup(el.getAttribute('data-group')); return; }
+  if (act === 'back-home') { setTab('films'); return; }
   if (act === 'new-project') {
     var np = blankProject(el.getAttribute('data-template') || 'feature');
     if (np.template === 'feature') applyFeatureTemplate(np);
     np.title = 'Untitled ' + (DB.projects.length + 1);
-    DB.projects.push(np); currentProjectId = np.id; save(); renderAll(); return;
+    DB.projects.push(np); currentProjectId = np.id; save(); setTab('dashboard'); return;
   }
   if (act === 'open-project') { currentProjectId = id; setTab('dashboard'); return; }
   if (act === 'dup-project') { var src = DB.projects.find(function (x) { return x.id === id; }); if (src) { var cp = clone(src); cp.id = uid(); cp.title = src.title + ' (copy)'; DB.projects.push(cp); save(); renderAll(); } return; }
@@ -1233,7 +1319,7 @@ function handleAction(act, el) {
   }
   if (act === 'clear-scenes') { if (confirm('Clear the breakdown? Scenes, shots and look notes go with it.')) { p.scenes = []; save(); renderAll(); } return; }
   if (act === 'send-scene-budget') { var sc1 = p.scenes.find(function (s) { return s.id === id; }); if (sc1) sendSceneToBudget(sc1); return; }
-  if (act === 'goto-scene') { currentTab = 'scenes'; renderAll(); var el2 = document.querySelector('[data-scene="' + id + '"]'); if (el2) el2.scrollIntoView(); return; }
+  if (act === 'goto-scene') { setTab('scenes'); var el2 = document.querySelector('[data-scene="' + id + '"]'); if (el2) el2.scrollIntoView(); return; }
   if (act === 'add-day') {
     var sel = $('sched-scenes');
     var chosen = sel ? Array.from(sel.selectedOptions).map(function (o) { return o.value; }) : [];

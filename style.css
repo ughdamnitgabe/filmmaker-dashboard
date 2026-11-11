@@ -42,42 +42,73 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Large-title header, translucent like iOS navigation bars. */
+/* Brand header — real clapperboard mark + wordmark, no emoji. */
 header.top {
   background: rgba(242, 242, 247, 0.82);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   backdrop-filter: saturate(180%) blur(20px);
   color: var(--text);
-  padding: 20px 20px 12px;
+  padding: 14px 20px 12px;
   position: sticky; top: 0; z-index: 20;
   border-bottom: 1px solid var(--separator);
 }
-header.top h1 { margin: 0; font-size: 34px; line-height: 1.1; font-weight: 700; letter-spacing: -0.5px; }
-header.top p { margin: 4px 0 0; font-size: 15px; color: var(--secondary); }
+.brand { display: flex; align-items: center; gap: 12px; max-width: 1280px; margin: 0 auto; }
+.brand-mark { width: 40px; height: 40px; flex: 0 0 auto; border-radius: 10px; }
+.brand-text h1 { margin: 0; font-size: 28px; line-height: 1.1; font-weight: 700; letter-spacing: -0.5px; }
+.brand-text p { margin: 2px 0 0; font-size: 14px; color: var(--secondary); }
+@media (min-width: 1024px) { .brand-text h1 { font-size: 32px; } }
 
-main { max-width: 1100px; margin: 0 auto; padding: 16px 16px 96px; }
+/* App shell — sidebar nav + content on desktop, stacked on phone.
+   Wider content column than the old centred phone column, so desktop
+   uses the space instead of floating a narrow card in grey. */
+.shell { max-width: 1280px; margin: 0 auto; }
+main { max-width: 1024px; margin: 0 auto; padding: 16px 16px 96px; }
+@media (min-width: 1024px) {
+  .shell { display: grid; grid-template-columns: 248px minmax(0, 1fr); align-items: start; }
+  main { max-width: 980px; padding: 24px 28px 96px; margin: 0; }
+}
 
-/* Tab bar — SF segmented-control feel: one grey track, the active
-   segment is a white pill with a soft shadow. 12 sections, so it
-   scrolls horizontally; the active tab is always reachable. */
-nav.tabs {
-  display: flex; gap: 2px; overflow-x: auto; padding: 3px;
-  position: sticky; top: 92px; z-index: 15;
-  background: var(--fill-2);
-  border-radius: 12px;
-  margin: 8px 0 16px;
-  scrollbar-width: none;
+/* Grouped navigation — 6 groups, every section one tap away.
+   Phone: a 3-column grid of group buttons (wraps, never scrolls
+   sideways), with the active group's sections as a full-width row of
+   wrapping chips underneath. The active section is always visible;
+   nothing truncates.
+   Desktop: sidebar, every group expanded as a labelled list. */
+.nav { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 12px 16px 0; }
+.nav-group { display: contents; }
+.nav-group-label {
+  display: block; width: 100%; text-align: center;
+  background: var(--fill-2); color: var(--text);
+  font-size: 15px; font-weight: 600;
+  min-height: 44px; padding: 10px 8px; border-radius: 10px;
 }
-nav.tabs::-webkit-scrollbar { display: none; }
-nav.tabs button {
-  white-space: nowrap; border: 0; background: transparent; color: var(--text);
-  border-radius: 9px; padding: 8px 13px; font-size: 14px; font-weight: 500;
-  cursor: pointer; min-height: 32px; flex: 0 0 auto;
+.nav-group.open .nav-group-label { background: var(--card); color: var(--accent); box-shadow: var(--shadow); }
+.nav-sections { display: none; flex-wrap: wrap; gap: 8px; }
+.nav-group.open .nav-sections { display: flex; grid-column: 1 / -1; }
+.nav-section {
+  background: var(--card); color: var(--text); border: 1px solid var(--separator);
+  border-radius: 999px; min-height: 44px; padding: 10px 16px;
+  font-size: 16px; font-weight: 500; white-space: normal; text-align: left;
 }
-nav.tabs button.active {
-  background: var(--card); color: var(--text);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12), 0 1px 1px rgba(0, 0, 0, 0.08);
-  font-weight: 600;
+.nav-section.active { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+@media (min-width: 1024px) {
+  .nav { display: block; position: sticky; top: 76px; padding: 24px 0 24px 20px; max-height: calc(100vh - 76px); overflow-y: auto; }
+  .nav-group { display: block; margin-bottom: 16px; }
+  .nav-group-label {
+    pointer-events: none; text-align: left; background: transparent;
+    font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--secondary); padding: 0 12px 6px; min-height: 0; box-shadow: none;
+  }
+  .nav-group.open .nav-group-label { color: var(--secondary); background: transparent; box-shadow: none; }
+  .nav-group.open .nav-sections, .nav-sections { display: flex; flex-direction: column; gap: 2px; flex-wrap: nowrap; grid-column: auto; }
+  .nav-section { background: transparent; border: 0; border-radius: 10px; min-height: 44px; padding: 10px 12px; font-size: 16px; }
+  .nav-section.active { background: var(--fill-2); color: var(--text); font-weight: 600; }
+}
+@media (prefers-color-scheme: dark) {
+  .nav-section.active { background: var(--accent); color: #fff; }
+}
+@media (min-width: 1024px) and (prefers-color-scheme: dark) {
+  .nav-section.active { background: #3a3a3c; color: #fff; }
 }
 
 /* Inset-grouped cards. */
@@ -92,6 +123,39 @@ nav.tabs button.active {
 .card h2 { margin: 0 0 6px; font-size: 22px; font-weight: 700; letter-spacing: -0.3px; }
 .card h3 { margin: 18px 0 8px; font-size: 17px; font-weight: 600; }
 .card h3:first-child { margin-top: 0; }
+
+/* Onboarding hero + per-section empty states. */
+.hero { text-align: left; padding: 24px 20px; }
+.hero-mark { margin: 4px 0 12px; }
+.hero-mark img { width: 72px; height: 72px; border-radius: 16px; display: block; }
+.hero h2 { font-size: 28px; }
+.empty-state { text-align: left; padding: 24px 20px; }
+.empty-mark { margin: 4px 0 12px; }
+.empty-mark img { width: 48px; height: 48px; border-radius: 12px; display: block; }
+.empty-state h2 { font-size: 24px; }
+.steps { list-style: none; counter-reset: step; margin: 16px 0; padding: 0; }
+.steps li {
+  counter-increment: step; position: relative;
+  padding: 12px 0 12px 44px; border-top: 1px solid var(--separator); font-size: 16px;
+}
+.steps li:first-child { border-top: 0; }
+.steps li::before {
+  content: counter(step); position: absolute; left: 0; top: 12px;
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--accent); color: #fff; font-size: 15px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.group-list { margin: 4px 0; }
+.group-row {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  background: transparent; border: 0; border-bottom: 1px solid var(--separator);
+  border-radius: 0; min-height: 56px; padding: 12px 2px;
+  font-size: 17px; text-align: left; color: var(--text);
+}
+.group-row:last-child { border-bottom: 0; }
+.group-row-label { font-weight: 600; flex: 0 0 auto; min-width: 92px; }
+.group-row-blurb { flex: 1 1 auto; color: var(--secondary); font-size: 15px; font-weight: 400; }
+.group-row-chev { color: var(--tertiary); font-size: 22px; font-weight: 400; }
 .sub { color: var(--secondary); font-size: 15px; margin: 4px 0 10px; }
 .muted { color: var(--secondary); font-size: 14px; }
 .small { font-size: 14px; }
@@ -99,18 +163,20 @@ nav.tabs button.active {
 .warn { color: var(--amber-ink); font-size: 14px; }
 .danger { color: var(--red-ink); }
 
-/* Buttons — 44px touch targets, blue primary, grey secondary. */
+/* Buttons — one system, 44px touch targets.
+   Primary: filled blue, white text — the one main action per card.
+   Default: grey fill, dark text. Tertiary (.ghost): blue text, no fill. */
 .btnrow { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; align-items: center; }
 button {
   font-family: inherit; font-size: 17px; font-weight: 500;
   min-height: 44px; padding: 10px 18px;
   border-radius: var(--radius-sm); border: 0;
-  background: var(--fill-2); color: var(--accent); cursor: pointer;
+  background: var(--fill-2); color: var(--text); cursor: pointer;
 }
 button:active { opacity: 0.6; }
 button.primary { background: var(--accent); color: #fff; font-weight: 600; }
 button.primary:active { background: var(--accent-pressed); }
-button.small { font-size: 15px; min-height: 36px; padding: 7px 13px; }
+button.small { font-size: 15px; min-height: 44px; padding: 10px 14px; }
 button.ghost { background: transparent; color: var(--accent); }
 button:disabled { opacity: 0.4; cursor: default; }
 
@@ -148,7 +214,7 @@ th, td { border-bottom: 1px solid var(--separator); padding: 12px 8px; text-alig
 th { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; color: var(--secondary); padding-bottom: 8px; }
 tr:last-child td { border-bottom: 0; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
-td input, td select { min-height: 36px; padding: 6px 8px; font-size: 15px; }
+td input, td select { min-height: 44px; padding: 8px 8px; font-size: 15px; }
 tr.total td { font-weight: 700; border-top: 2px solid var(--separator-strong); border-bottom: 0; }
 tr.over td { color: var(--red-ink); }
 tr.over td.num { color: var(--red); }
@@ -175,11 +241,11 @@ tr.over td.num { color: var(--red); }
 .line-top input[data-lfield="desc"]:focus { background: var(--fill); padding-left: 10px; }
 .line-total { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .line-math { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
-.line-math input[type=number] { width: 84px; min-height: 36px; font-size: 15px; text-align: center; }
+.line-math input[type=number] { width: 84px; min-height: 44px; font-size: 15px; text-align: center; }
 .line-math .math-x { color: var(--secondary); font-size: 15px; }
-.line-math select { flex: 1 1 140px; min-width: 130px; min-height: 36px; font-size: 15px; }
+.line-math select { flex: 1 1 140px; min-width: 130px; min-height: 44px; font-size: 15px; }
 .line-sub { margin-top: 8px; color: var(--secondary); font-size: 14px; font-variant-numeric: tabular-nums; }
-.line-del { flex: 0 0 auto; min-width: 36px; min-height: 36px; padding: 4px 10px; font-size: 20px; color: var(--red); background: transparent; }
+.line-del { flex: 0 0 auto; min-width: 44px; min-height: 44px; padding: 4px 10px; font-size: 20px; color: var(--red); background: transparent; }
 .account-total {
   display: flex; justify-content: space-between; align-items: baseline;
   border-top: 2px solid var(--separator-strong); padding: 14px 2px 2px; margin-top: 6px;
@@ -237,7 +303,7 @@ footer { text-align: center; color: var(--secondary); font-size: 13px; padding: 
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   }
   header.top { background: rgba(0, 0, 0, 0.82); }
-  nav.tabs button.active { background: #636366; color: #fff; }
+  nav .nav-section.active { background: #636366; color: #fff; }
   .pill.done { background: #1d3a24; color: #30d158; }
   .pill.warn { background: #3a2f14; color: #ffd60a; }
   input:focus, select:focus, textarea:focus { background: #2c2c2e; }
@@ -247,7 +313,7 @@ footer { text-align: center; color: var(--secondary); font-size: 13px; padding: 
 @media print {
   :root { color-scheme: light; }
   body { background: #fff; color: #000; font-size: 14px; }
-  header.top, nav.tabs, .noprint, footer, .btnrow { display: none !important; }
+  header.top, .nav, .noprint, footer, .btnrow { display: none !important; }
   main { max-width: none; padding: 0; }
   #view { display: none; }
   #print-view { display: block; }

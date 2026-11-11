@@ -9,22 +9,32 @@
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="icon" href="favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Filmmaker Dashboard">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header class="top">
-  <h1>🎬 Filmmaker Dashboard</h1>
-  <p>Script → budget → schedule → set. One film, one place. Shared by Gabe &amp; Amelia.</p>
+  <div class="brand">
+    <img src="icon.svg" alt="Filmmaker Dashboard" class="brand-mark" width="40" height="40">
+    <div class="brand-text">
+      <h1>Filmmaker Dashboard</h1>
+      <p>Script &rarr; budget &rarr; schedule &rarr; set. One film, one place. Shared by Gabe &amp; Amelia.</p>
+    </div>
+  </div>
 </header>
-<main>
-  <nav class="tabs noprint" id="tabs" aria-label="Sections"></nav>
-  <div id="view"></div>
-  <footer>Personal tool for Gabe &amp; Amelia — not for sale. Works offline on this device; sign in to sync the shared library to the cloud.</footer>
-</main>
+<div class="shell">
+  <nav class="nav noprint" id="nav" aria-label="Sections"></nav>
+  <main>
+    <div id="view"></div>
+    <footer>Personal tool for Gabe &amp; Amelia — not for sale. Works offline on this device; sign in to sync the shared library to the cloud.</footer>
+  </main>
+</div>
 <div id="print-view"></div>
 <script src="app.js"></script>
 </body>
