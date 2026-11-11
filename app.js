@@ -801,7 +801,7 @@ function visibleAccounts(p) {
 function viewDashboard(p) {
   var b = calcBudget(p), bonds = calcBonds(p), fin = calcFinancing(p), act = calcActuals(p), prog = producerProgress(p);
   var propsDue = (p.props || []).filter(function (x) { return x.status !== 'On set' && x.status !== 'Returned' && x.prepBy && x.prepBy <= todayISO(); });
-  var kpi = function (label, val, sub) { return '<div class="card"><div class="kpi-label">' + label + '</div><div class="kpi">' + val + '</div><div class="muted">' + (sub || '') + '</div></div>'; };
+  var kpi = function (label, val, sub) { return '<div class="card kpi-card"><div class="kpi-label">' + label + '</div><div class="kpi">' + val + '</div><div class="muted">' + (sub || '') + '</div></div>'; };
   var rows = Object.keys(prog).map(function (k) { return '<tr><td>' + k + '</td><td>' + esc(prog[k]) + '</td></tr>'; }).join('');
   return headerFields(p) +
     '<div class="grid4">' +
@@ -829,12 +829,16 @@ function viewBudget(p) {
   var isDept = currentRole === 'dept';
   var accounts = visibleAccounts(p);
   var pct = function (v) { return b.grandTotal ? (100 * v / b.grandTotal).toFixed(1) + '%' : '—'; };
-  var tops = '<div class="card"><h2>Topsheet</h2><table><tr><th>Section</th><th class="num">Total</th><th class="num">% of total</th></tr>' +
-    ['ATL', 'BTL', 'POST', 'OTHER'].map(function (s) { return '<tr><td>' + (s === 'ATL' ? 'Above the Line' : s === 'BTL' ? 'Below the Line — Production' : s === 'POST' ? 'Post-Production' : 'Other') + '</td><td class="num">' + money(b.sections[s] || 0) + '</td><td class="num">' + pct(b.sections[s] || 0) + '</td></tr>'; }).join('') +
-    '<tr><td>Subtotal (wages &amp; costs)</td><td class="num">' + money(b.subtotal) + '</td><td class="num">' + pct(b.subtotal) + '</td></tr>' +
-    '<tr><td>Fringes &amp; taxes</td><td class="num">' + money(b.fringe) + '</td><td class="num">' + pct(b.fringe) + '</td></tr>' +
-    '<tr><td>Contingency (' + p.globals.contingencyPct + '%)</td><td class="num">' + money(b.contingency) + '</td><td class="num">' + pct(b.contingency) + '</td></tr>' +
-    '<tr class="total"><td>Grand total</td><td class="num">' + money(b.grandTotal) + '</td><td class="num">100%</td></tr></table>' +
+  var topsRow = function (label, v) { return '<div class="list-row"><span class="list-label">' + label + '</span><span class="list-pct">' + pct(v) + '</span><span class="list-amount">' + money(v) + '</span></div>'; };
+  var tops = '<div class="card"><h2>Topsheet</h2><div class="list-group">' +
+    topsRow('Above the Line', b.sections.ATL || 0) +
+    topsRow('Below the Line — Production', b.sections.BTL || 0) +
+    topsRow('Post-Production', b.sections.POST || 0) +
+    topsRow('Other', b.sections.OTHER || 0) +
+    topsRow('Subtotal (wages &amp; costs)', b.subtotal) +
+    topsRow('Fringes &amp; taxes', b.fringe) +
+    topsRow('Contingency (' + p.globals.contingencyPct + '%)', b.contingency) +
+    '<div class="list-row total"><span class="list-label">Grand total</span><span class="list-pct">100%</span><span class="list-amount">' + money(b.grandTotal) + '</span></div></div>' +
     '<p class="muted">SAG security deposit ' + money(calcBonds(p).deposit) + ' is locked cash — NOT in the total above. Total cash required: ' + money(calcBonds(p).totalCashRequired) + '. See Financing &amp; Bonds.</p></div>';
   var globals = '<div class="card"><h3>Globals — change one number, the budget reprices</h3><div class="grid4">' +
     '<label>Shoot days<input type="number" data-global="shootDays" value="' + p.globals.shootDays + '"></label>' +
@@ -847,21 +851,25 @@ function viewBudget(p) {
   var detail = accounts.map(function (a) {
     var t = accountTotals(a, b.derived);
     var rows = a.lines.map(function (l) {
-      return '<tr><td><input data-line="' + l.id + '" data-lfield="desc" value="' + esc(l.desc) + '"></td>' +
-        '<td><input type="number" data-line="' + l.id + '" data-lfield="qty" value="' + lineQty(l, b.derived) + '"' + (l.qtyGlobal ? ' title="Linked to ' + l.qtyGlobal + '"' : '') + '></td>' +
-        '<td><input type="number" data-line="' + l.id + '" data-lfield="x" value="' + l.x + '"></td>' +
-        '<td><input type="number" data-line="' + l.id + '" data-lfield="rate" value="' + l.rate + '"></td>' +
-        '<td><select data-line="' + l.id + '" data-lfield="fringeId">' + FRINGES.map(function (f) { return '<option value="' + f.id + '"' + (l.fringeId === f.id ? ' selected' : '') + '>' + f.name + '</option>'; }).join('') + '</select></td>' +
-        '<td><select data-line="' + l.id + '" data-lfield="qtyGlobal"><option value="">—</option>' +
+      return '<div class="line-row">' +
+        '<div class="line-top"><input data-line="' + l.id + '" data-lfield="desc" value="' + esc(l.desc) + '" aria-label="Description">' +
+        '<span class="line-total">' + money(lineTotal(l, b.derived)) + '</span>' +
+        '<button type="button" class="line-del" data-action="del-line" data-id="' + l.id + '" title="Delete line">×</button></div>' +
+        '<div class="line-math"><input type="number" data-line="' + l.id + '" data-lfield="qty" value="' + lineQty(l, b.derived) + '"' + (l.qtyGlobal ? ' title="Linked to ' + l.qtyGlobal + '"' : '') + ' aria-label="Qty">' +
+        '<span class="math-x">×</span>' +
+        '<input type="number" data-line="' + l.id + '" data-lfield="x" value="' + l.x + '" aria-label="Times">' +
+        '<span class="math-x">@</span>' +
+        '<input type="number" data-line="' + l.id + '" data-lfield="rate" value="' + l.rate + '" aria-label="Rate">' +
+        '<select data-line="' + l.id + '" data-lfield="fringeId" aria-label="Fringe">' + FRINGES.map(function (f) { return '<option value="' + f.id + '"' + (l.fringeId === f.id ? ' selected' : '') + '>' + f.name + '</option>'; }).join('') + '</select>' +
+        '<select data-line="' + l.id + '" data-lfield="qtyGlobal" aria-label="Link qty to"><option value="">— link qty —</option>' +
         '<option value="shootDays"' + (l.qtyGlobal === 'shootDays' ? ' selected' : '') + '>Shoot days</option>' +
         (p.scenes || []).flatMap(function (s) { return s.characters || []; }).filter(function (v, i, a2) { return a2.indexOf(v) === i; }).map(function (c) { return '<option value="castDays:' + esc(c) + '"' + (l.qtyGlobal === 'castDays:' + c ? ' selected' : '') + '>Cast days: ' + esc(c) + '</option>'; }).join('') +
-        '</select></td>' +
-        '<td class="num">' + money(lineSubtotal(l, b.derived)) + '</td><td class="num">' + money(lineFringe(l, b.derived)) + '</td><td class="num">' + money(lineTotal(l, b.derived)) + '</td>' +
-        '<td><button type="button" class="small ghost" data-action="del-line" data-id="' + l.id + '" title="Delete line">×</button></td></tr>';
+        '</select></div>' +
+        '<div class="line-sub">Subtotal ' + money(lineSubtotal(l, b.derived)) + ' · Fringe ' + money(lineFringe(l, b.derived)) + '</div></div>';
     }).join('');
-    return '<div class="card"><h3>' + a.code + ' — ' + esc(a.name) + ' <span class="muted">' + money(t.total) + '</span></h3>' +
-      '<div style="overflow-x:auto"><table><tr><th>Description</th><th>Qty</th><th>×</th><th>Rate</th><th>Fringe</th><th>Link qty to</th><th class="num">Subtotal</th><th class="num">Fringe $</th><th class="num">Total</th><th></th></tr>' + rows +
-      '<tr class="total"><td colspan="6">Account total</td><td class="num">' + money(t.subtotal) + '</td><td class="num">' + money(t.fringe) + '</td><td class="num">' + money(t.total) + '</td><td></td></tr></table></div>' +
+    return '<div class="card"><h3>' + a.code + ' — ' + esc(a.name) + '</h3>' +
+      '<div class="list-group">' + rows + '</div>' +
+      '<div class="account-total"><span>Account total <span class="muted">· Subtotal ' + money(t.subtotal) + ' · Fringe ' + money(t.fringe) + '</span></span><span>' + money(t.total) + '</span></div>' +
       '<div class="btnrow"><button type="button" class="small" data-action="add-line" data-id="' + a.id + '">＋ Add line</button>' +
       '<button type="button" class="small" data-action="apply-sag" data-id="' + a.id + '">Apply SAG tier to cast</button></div></div>';
   }).join('');
