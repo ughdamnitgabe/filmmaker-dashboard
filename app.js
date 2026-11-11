@@ -138,6 +138,9 @@ function blankProject(template) {
     accounts: ACCOUNTS.map(function (a) { return newAccount(a.code, a.name, a.section, []); }),
     locations: [], actuals: [], scenes: [], props: [], crew: [],
     schedule: { startDate: '', days: [] }, /* days: [{id, date, sceneIds:[], callTime, location, notes}] */
+    lined: {}, /* sceneId -> {shot, takes:[{n, coverage, circled, note}], note, continuity, adr, wild} */
+    scheduleDraft: null, /* {days:[...], warnings:[], summary} — draft only, never applied until approved */
+    pendingImport: null, /* {kind:'script'|'schedule', items:[{keep, scene|day}]} — review screen, not yet applied */
     financing: { sources: [], notes: '' },
     bonds: { depositOn: true, depositPct: 40, depositFlat: null, depositReturned: false, depositNote: '40% planning default. Your SAG-AFTRA security deposit letter is the authoritative number.' },
     moodboards: [], /* {id, title, scope, images:[{src, caption}], notes} */
@@ -348,6 +351,7 @@ function producerProgress(p) {
     props: propsReady + ' / ' + (p.props || []).length + ' props ready',
     budget: money(b.grandTotal) + ' total',
     schedule: (p.schedule.days || []).length + ' shoot days',
+    onset: (function () { var lp = liningProgress(p); return lp.scenesShot + ' / ' + lp.scenesTotal + ' scenes shot · ' + lp.pagesShot + ' / ' + lp.pagesTotal + ' pages · ' + lp.takesTotal + ' takes'; })(),
     financing: money(calcFinancing(p).committed) + ' committed'
   };
 }
@@ -396,7 +400,7 @@ var PROP_KEYWORDS = ['gun', 'pistol', 'rifle', 'knife', 'sword', 'phone', 'lapto
 function parseScriptText(text) {
   var lines = String(text || '').split(/\r?\n/);
   var scenes = [], cur = null;
-  function flush() { if (cur) scenes.push(cur); cur = null; }
+  function flush() { if (cur) { cur.pages = scenePageEstimate(cur); scenes.push(cur); } cur = null; }
   lines.forEach(function (raw) {
     var line = raw.trim();
     if (!line) return;
@@ -405,7 +409,7 @@ function parseScriptText(text) {
       flush();
       var rest = slug[2];
       var parts = rest.split(/\s+-\s+/);
-      cur = { id: uid(), slug: line.toUpperCase(), location: (parts[0] || '').trim(), dayNight: (parts[1] || '').trim(), characters: [], props: [], description: '', coverage: '', dept: { Wardrobe: '', Art: '', Camera: '', Sound: '', 'Makeup & Hair': '' }, look: { notes: '', lighting: '', color: '', lens: '', images: [] }, shots: [], mood: [] };
+      cur = { id: uid(), slug: line.toUpperCase(), location: (parts[0] || '').trim(), dayNight: (parts[1] || '').trim(), characters: [], props: [], description: '', coverage: '', dept: { Wardrobe: '', Art: '', Camera: '', Sound: '', 'Makeup & Hair': '' }, look: { notes: '', lighting: '', color: '', lens: '', images: [] }, shots: [], mood: [], scriptText: '' };
       return;
     }
     if (!cur) return;
@@ -413,9 +417,11 @@ function parseScriptText(text) {
     if (/^[A-Z][A-Z0-9 '’\-()]{1,30}$/.test(line) && !/[.!?]$/.test(line) && line.split(' ').length <= 4) {
       var name = line.replace(/\s*\(.*\)\s*$/, '').trim();
       if (name && cur.characters.indexOf(name) < 0 && name.length > 1) cur.characters.push(name);
+      cur.scriptText = (cur.scriptText ? cur.scriptText + '\n' : '') + line;
       return;
     }
     cur.description = (cur.description ? cur.description + ' ' : '') + line;
+    cur.scriptText = (cur.scriptText ? cur.scriptText + '\n' : '') + line;
     var low = line.toLowerCase();
     PROP_KEYWORDS.forEach(function (kw) {
       if (low.indexOf(kw) >= 0 && cur.props.indexOf(kw) < 0) cur.props.push(kw);
@@ -429,18 +435,20 @@ function parseFDX(text) {
     var doc = new DOMParser().parseFromString(text, 'text/xml');
     var paras = doc.getElementsByTagName('Paragraph');
     var out = [], cur = null;
-    function flush() { if (cur) out.push(cur); cur = null; }
+    function flush() { if (cur) { cur.pages = scenePageEstimate(cur); out.push(cur); } cur = null; }
     for (var i = 0; i < paras.length; i++) {
       var type = paras[i].getAttribute('Type') || '';
       var txt = paras[i].textContent.trim();
       if (!txt) continue;
       if (type === 'Scene Heading') {
         flush();
-        cur = { id: uid(), slug: txt.toUpperCase(), location: txt, dayNight: '', characters: [], props: [], description: '', coverage: '', dept: { Wardrobe: '', Art: '', Camera: '', Sound: '', 'Makeup & Hair': '' }, look: { notes: '', lighting: '', color: '', lens: '', images: [] }, shots: [], mood: [] };
+        cur = { id: uid(), slug: txt.toUpperCase(), location: txt, dayNight: '', characters: [], props: [], description: '', coverage: '', dept: { Wardrobe: '', Art: '', Camera: '', Sound: '', 'Makeup & Hair': '' }, look: { notes: '', lighting: '', color: '', lens: '', images: [] }, shots: [], mood: [], scriptText: '' };
       } else if (type === 'Character') {
         if (cur) { var n = txt.replace(/\s*\(.*\)\s*$/, '').trim(); if (n && cur.characters.indexOf(n) < 0) cur.characters.push(n); }
+        if (cur) cur.scriptText = (cur.scriptText ? cur.scriptText + '\n' : '') + txt;
       } else if (cur) {
         cur.description = (cur.description ? cur.description + ' ' : '') + txt;
+        cur.scriptText = (cur.scriptText ? cur.scriptText + '\n' : '') + txt;
         var low = txt.toLowerCase();
         PROP_KEYWORDS.forEach(function (kw) { if (low.indexOf(kw) >= 0 && cur.props.indexOf(kw) < 0) cur.props.push(kw); });
       }
@@ -450,9 +458,353 @@ function parseFDX(text) {
   } catch (e) { return parseScriptText(text); }
 }
 
+
+/* ---------------- PDF import + AI schedule draft + lined script (pure) ---------------- */
+/* These run on text already extracted from a PDF (or pasted text) — the
+   parsers never see a PDF binary, which is why the Node tests feed them
+   plain text. PDF text extraction itself is browser-only (vendored
+   pdf.js, see extractPdfText below) and the file never leaves the device. */
+
+/* Pages per scene, from description length (~130 words/page in a
+   screenplay), rounded to the nearest 1/8 page, minimum 1/8. */
+function scenePageEstimate(scene) {
+  var words = String((scene && scene.description) || '').trim().split(/\s+/).filter(Boolean).length;
+  var eighths = Math.max(1, Math.round(words / 130 * 8));
+  return eighths / 8;
+}
+/* Escape + wrap detected props in <mark class="prop-hi"> so the script
+   text view highlights them. Whole-word match, longest prop first. */
+function highlightProps(text, props) {
+  var out = esc(text || '');
+  var list = (props || []).slice().sort(function (a, b) { return b.length - a.length; });
+  list.forEach(function (pr) {
+    if (!pr) return;
+    var re = new RegExp('\\b' + String(pr).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'gi');
+    out = out.replace(re, function (m) { return '<mark class="prop-hi">' + m + '</mark>'; });
+  });
+  return out;
+}
+/* A scanned PDF has no text layer. pdf.js returns ~nothing for it; this
+   is the single rule the UI uses, so a scan gets a plain warning and
+   never a guessed breakdown. */
+function isScannedPdfText(text, pages) {
+  var t = String(text || '').replace(/\s+/g, '').length;
+  return t < 20;
+}
+function dateMinus(iso, days) {
+  if (!iso) return '';
+  var d = new Date(iso + 'T12:00:00'); if (isNaN(d)) return '';
+  d.setDate(d.getDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+var MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
+function parseDateToken(s) {
+  var m;
+  m = String(s).match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return m[1] + '-' + m[2] + '-' + m[3];
+  m = String(s).match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})?/i);
+  if (m) { var y = m[3] || '2027'; return y + '-' + ('0' + MONTHS[m[1].toLowerCase().slice(0, 3)]).slice(-2) + '-' + ('0' + m[2]).slice(-2); }
+  m = String(s).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return m[3] + '-' + ('0' + m[1]).slice(-2) + '-' + ('0' + m[2]).slice(-2);
+  return '';
+}
+/* Parse shooting-schedule text (from a schedule PDF) into draft shoot
+   days. Understands "DAY 1 — MONDAY, JANUARY 4, 2027", bare dates,
+   "Call 7:00 AM", "Sc. 12" / "Scene 12" refs and sluglines. Scene
+   numbers map to the breakdown in order (scene 1 = first scene); a
+   slugline matches by slug text. Anything it cannot place is flagged
+   in warnings for the review screen — never silently dropped. */
+function parseScheduleText(text, scenes) {
+  var lines = String(text || '').split(/\r?\n/);
+  var days = [], cur = null, warnings = [];
+  function flush() { if (cur) days.push(cur); cur = null; }
+  function sceneIdFor(num, slugText) {
+    if (slugText && scenes) {
+      var hit = null;
+      scenes.forEach(function (s) {
+        if (!hit && s.slug && (s.slug.toUpperCase() === slugText.toUpperCase() || slugText.toUpperCase().indexOf(s.slug) >= 0)) hit = s;
+      });
+      if (hit) return hit.id;
+    }
+    if (num && scenes && scenes[num - 1]) return scenes[num - 1].id;
+    return null;
+  }
+  lines.forEach(function (raw) {
+    var line = raw.trim();
+    if (!line) return;
+    var dm = line.match(/^(?:SHOOT\s+)?DAY\s+(\d+)\b(.*)$/i);
+    if (dm) {
+      flush();
+      cur = { id: uid(), date: parseDateToken(dm[2] || ''), callTime: '', location: '', sceneIds: [], sceneNums: [], notes: '', keep: true };
+      var cm0 = (dm[2] || '').match(/CALL(?:\s+TIME)?[:\s]+(\d{1,2}:\d{2}\s*[AP]\.?M\.?)/i);
+      if (cm0) cur.callTime = cm0[1];
+      return;
+    }
+    var dt = parseDateToken(line);
+    var sceneRef = line.match(/^(?:SCENES?|SC\.?)\s+([\d,\s&and]+)/i) || line.match(/^(INT\.|EXT\.|INT\/EXT\.|I\/E\.)\s+(.+)$/i);
+    if (dt && !sceneRef && line.length < 60) {
+      /* A bare date line starts a new day — unless we are still on a
+         day header that has no date or scenes yet, in which case it
+         fills that day's date in. */
+      if (cur && ((cur.sceneIds || []).length || cur.callTime || cur.location)) flush();
+      if (!cur) cur = { id: uid(), date: dt, callTime: '', location: '', sceneIds: [], sceneNums: [], notes: '', keep: true };
+      else cur.date = dt;
+      return;
+    }
+    /* Anything else only counts if it attaches to a day — an unrecognised
+       line (a title, a note) is skipped, never a day of its own. */
+    var cm = line.match(/CALL(?:\s+TIME)?[:\s]+(\d{1,2}:\d{2}\s*[AP]\.?M\.?)/i);
+    if (cm) { if (!cur) cur = { id: uid(), date: '', callTime: '', location: '', sceneIds: [], sceneNums: [], notes: '', keep: true }; cur.callTime = cm[1]; return; }
+    var lm = line.match(/^(?:LOCATION|LOC)[:\s]+(.+)$/i);
+    if (lm) { if (!cur) cur = { id: uid(), date: '', callTime: '', location: '', sceneIds: [], sceneNums: [], notes: '', keep: true }; cur.location = lm[1].trim(); return; }
+    var sm = line.match(/^(?:SCENES?|SC\.?)\s+([\d,\s&and]+)/i);
+    if (sm) {
+      if (!cur) cur = { id: uid(), date: '', callTime: '', location: '', sceneIds: [], sceneNums: [], notes: '', keep: true };
+      sm[1].match(/\d+/g).forEach(function (n) {
+        var sid = sceneIdFor(parseInt(n, 10), null);
+        if (sid) { if (cur.sceneIds.indexOf(sid) < 0) cur.sceneIds.push(sid); cur.sceneNums.push(parseInt(n, 10)); }
+        else warnings.push('Scene ' + n + ' is named in the schedule but is not in the breakdown — check the scene number.');
+      });
+      return;
+    }
+    var slug = line.match(/^(INT\.|EXT\.|INT\/EXT\.|I\/E\.)\s+(.+)$/i);
+    if (slug) {
+      if (!cur) cur = { id: uid(), date: '', callTime: '', location: '', sceneIds: [], sceneNums: [], notes: '', keep: true };
+      var sid2 = sceneIdFor(null, line);
+      if (sid2) { if (cur.sceneIds.indexOf(sid2) < 0) cur.sceneIds.push(sid2); }
+      else warnings.push('“' + line + '” is named in the schedule but is not in the breakdown.');
+      return;
+    }
+  });
+  flush();
+  if (!days.length) return { days: [], warnings: ['No shoot days or scenes found in this file — check it is a shooting schedule, not a script.'] };
+  var undated = days.filter(function (d) { return !d.date; }).length;
+  if (undated) warnings.push(undated + ' day(s) have no date — fill the date in on the review screen before approving.');
+  if (days.some(function (d) { return !(d.sceneIds || []).length; })) warnings.push('Some days have no scenes matched — check scene numbers against the breakdown.');
+  return { days: days, warnings: warnings };
+}
+/* Rule-based "AI" schedule draft — no external key, no network. Groups
+   scenes by location + day/night in story order, packs them into days
+   (max 4 scenes or ~3 pages a day), and flags the conflicts a UPM
+   would check: a location split across days, a night shoot right after
+   a day shoot, a day that mixes day and night. Dates are filled in
+   from startDate when one exists; otherwise they stay blank for review.
+   The draft is data only — it never touches p.schedule until approved. */
+function proposeScheduleDays(scenes, startDate) {
+  var list = (scenes || []).filter(Boolean);
+  var groups = [];
+  list.forEach(function (s) {
+    var dn = /NIGHT/i.test((s.dayNight || '') + ' ' + (s.slug || '')) ? 'NIGHT' : 'DAY';
+    var key = (s.location || 'Unknown location') + '|' + dn;
+    var g = null;
+    groups.forEach(function (x) { if (x.key === key) g = x; });
+    if (!g) { g = { key: key, location: s.location || 'Unknown location', dayNight: dn, scenes: [] }; groups.push(g); }
+    g.scenes.push(s);
+  });
+  var days = [], warnings = [], MAX_SCENES = 4, MAX_PAGES = 3;
+  groups.forEach(function (g) {
+    var before = days.length, cur = null;
+    g.scenes.forEach(function (s) {
+      var pg = scenePageEstimate(s);
+      if (!cur || cur.sceneIds.length >= MAX_SCENES || cur.pages + pg > MAX_PAGES) {
+        cur = { id: uid(), date: '', callTime: '7:00 AM', location: g.location, dayNight: g.dayNight, sceneIds: [], pages: 0, warnings: [], keep: true };
+        days.push(cur);
+      }
+      cur.sceneIds.push(s.id); cur.pages += pg;
+    });
+    if (days.length - before > 1) {
+      var msg = '“' + g.location + ' — ' + g.dayNight + '” is split across ' + (days.length - before) + ' shoot days — consider one location block.';
+      warnings.push(msg);
+      days.slice(before).forEach(function (d) { d.warnings.push(msg); });
+    }
+  });
+  var locDays = {};
+  days.forEach(function (d, i) { (locDays[d.location] = locDays[d.location] || []).push(i); });
+  Object.keys(locDays).forEach(function (loc) {
+    var idx = locDays[loc];
+    if (idx.length > 1 && idx[idx.length - 1] - idx[0] !== idx.length - 1) {
+      warnings.push('Location “' + loc + '” is split across non-consecutive days — you may be paying for the location twice.');
+    }
+  });
+  days.forEach(function (d, i) {
+    if (i > 0 && d.dayNight === 'NIGHT' && days[i - 1].dayNight === 'DAY') {
+      var m2 = 'Day ' + (i + 1) + ' is a night shoot right after a day shoot — check turnaround (10–12 hrs) before you lock it.';
+      warnings.push(m2); d.warnings.push(m2);
+    }
+  });
+  if (startDate) {
+    var d0 = new Date(startDate + 'T12:00:00');
+    if (!isNaN(d0)) days.forEach(function (d, i) {
+      var dd = new Date(d0); dd.setDate(dd.getDate() + i);
+      d.date = dd.toISOString().slice(0, 10);
+    });
+  } else {
+    warnings.push('No start date set — set one on the Schedule tab and dates will fill in, or fill them in on the review screen.');
+  }
+  var locCount = {};
+  list.forEach(function (s) { locCount[s.location || 'Unknown'] = true; });
+  return { days: days, warnings: warnings, summary: list.length + ' scene(s) → ' + days.length + ' shoot day(s) in ' + Object.keys(locCount).length + ' location(s).' };
+}
+/* ---------------- lined script (pure state) ---------------- */
+function ensureLined(p) { if (!p.lined) p.lined = {}; return p.lined; }
+function getLinedScene(p, sceneId) {
+  var lined = ensureLined(p);
+  if (!lined[sceneId]) lined[sceneId] = { shot: false, takes: [], note: '', continuity: '', adr: false, wild: false };
+  var st = lined[sceneId];
+  if (!Array.isArray(st.takes)) st.takes = [];
+  return st;
+}
+function markSceneShot(p, sceneId, take) {
+  var st = getLinedScene(p, sceneId);
+  var n = (take && take.n) || (st.takes.length + 1);
+  st.takes.push({ n: n, coverage: (take && take.coverage) || 'Wide', circled: !!(take && take.circled), note: (take && take.note) || '' });
+  st.shot = true;
+  return st;
+}
+function toggleSceneShot(p, sceneId) {
+  var st = getLinedScene(p, sceneId);
+  if (st.shot) { st.takes = []; st.shot = false; }
+  else markSceneShot(p, sceneId, { n: 1, coverage: 'Wide' });
+  return st;
+}
+function setCircledTake(p, sceneId, idx) {
+  var st = getLinedScene(p, sceneId);
+  st.takes.forEach(function (t, i) { t.circled = (i === idx); });
+  return st;
+}
+function liningProgress(p) {
+  var scenes = p.scenes || [];
+  var total = scenes.length, shot = 0, takes = 0, circled = 0, adr = 0, wild = 0, pagesTotal = 0, pagesShot = 0;
+  scenes.forEach(function (s) {
+    var pg = (typeof s.pages === 'number') ? s.pages : scenePageEstimate(s);
+    pagesTotal += pg;
+    var st = (p.lined || {})[s.id];
+    if (st && st.shot) { shot++; pagesShot += pg; }
+    if (st) {
+      takes += (st.takes || []).length;
+      circled += (st.takes || []).filter(function (t) { return t.circled; }).length;
+      if (st.adr) adr++;
+      if (st.wild) wild++;
+    }
+  });
+  return { scenesTotal: total, scenesShot: shot, scenesRemaining: total - shot, takesTotal: takes, circledTotal: circled, adrCount: adr, wildCount: wild, pagesTotal: Math.round(pagesTotal * 8) / 8, pagesShot: Math.round(pagesShot * 8) / 8, setupsDone: takes };
+}
+/* Daily Production Report data for one date (default today): what was
+   scheduled, what got shot, pages, setups, circled takes, ADR/wild. */
+function dprSummary(p, dateISO) {
+  var date = dateISO || todayISO();
+  var day = ((p.schedule || {}).days || []).find(function (d) { return d.date === date; });
+  var lp = liningProgress(p);
+  var shotToday = 0, pagesToday = 0, takesToday = 0, circledToday = [];
+  if (day) (day.sceneIds || []).forEach(function (sid) {
+    var s = (p.scenes || []).find(function (x) { return x.id === sid; });
+    var st = (p.lined || {})[sid];
+    if (s && st && st.shot) {
+      shotToday++;
+      pagesToday += (typeof s.pages === 'number') ? s.pages : scenePageEstimate(s);
+      takesToday += (st.takes || []).length;
+      (st.takes || []).forEach(function (t) { if (t.circled) circledToday.push(s.slug + ' take ' + t.n); });
+    }
+  });
+  return { date: date, hasShootDay: !!day, callTime: day ? day.callTime : '', location: day ? day.location : '', scenesScheduled: day ? (day.sceneIds || []).length : 0, scenesShotToday: shotToday, pagesShotToday: Math.round(pagesToday * 8) / 8, setupsToday: takesToday, circledToday: circledToday, overall: lp };
+}
+/* ---------------- import review / apply (pure) ---------------- */
+function buildScriptImportReview(scenes) {
+  return { kind: 'script', createdAt: nowISO(), items: (scenes || []).map(function (s) { return { keep: true, scene: s }; }) };
+}
+function buildScheduleImportReview(parsed) {
+  return { kind: 'schedule', createdAt: nowISO(), warnings: parsed.warnings || [], items: (parsed.days || []).map(function (d) { return { keep: true, day: d }; }) };
+}
+function mergePropsFromScenes(p) {
+  var added = 0;
+  (p.scenes || []).forEach(function (s) {
+    (s.props || []).forEach(function (pr) {
+      var ex = (p.props || []).find(function (x) { return x.name === pr; });
+      if (!ex) { p.props.push({ id: uid(), name: pr, dept: 'Props', firstNeeded: '', prepBy: '', status: 'Needed', sceneIds: [s.id] }); added++; }
+      else if (ex.sceneIds.indexOf(s.id) < 0) ex.sceneIds.push(s.id);
+    });
+  });
+  return added;
+}
+function applyPropsFirstNeeded(p) {
+  var days = ((p.schedule || {}).days || []).slice().sort(function (a, b) { return (a.date || '').localeCompare(b.date || ''); });
+  (p.props || []).forEach(function (pr) {
+    var first = '';
+    days.forEach(function (d) {
+      if (first) return;
+      if ((pr.sceneIds || []).some(function (sid) { return (d.sceneIds || []).indexOf(sid) >= 0; })) first = d.date || '';
+    });
+    if (first) { pr.firstNeeded = first; pr.prepBy = dateMinus(first, 2) || pr.prepBy; }
+  });
+}
+function applyImportReview(p, review) {
+  var out = { scenesAdded: 0, daysAdded: 0, propsAdded: 0 };
+  if (!review) return out;
+  if (review.kind === 'script') {
+    var kept = review.items.filter(function (it) { return it.keep; }).map(function (it) { return it.scene; });
+    p.scenes = kept;
+    out.scenesAdded = kept.length;
+    out.propsAdded = mergePropsFromScenes(p);
+    p.scheduleDraft = proposeScheduleDays(kept, (p.schedule && p.schedule.startDate) || '');
+    p.pendingImport = null;
+  } else if (review.kind === 'schedule') {
+    var days = review.items.filter(function (it) { return it.keep; }).map(function (it) {
+      var d = it.day;
+      return { id: uid(), date: d.date || '', callTime: d.callTime || '', location: d.location || '', sceneIds: d.sceneIds || [], notes: '' };
+    });
+    p.schedule.days = days;
+    out.daysAdded = days.length;
+    applyPropsFirstNeeded(p);
+    p.pendingImport = null;
+  }
+  return out;
+}
+/* Add one scene's cast / props / location to the budget (pure — the
+   click handler wraps this with save + render). Same SAG tier and
+   fringes as the per-scene button it was extracted from. */
+function addSceneToBudget(p, scene) {
+  var out = { castAdded: 0, propsAdded: 0, locAdded: 0 };
+  var b = calcBudget(p);
+  var tier = sagTierForBudget(b.grandTotal);
+  var castAcc = p.accounts.find(function (a) { return a.code === '1400'; });
+  (scene.characters || []).forEach(function (c) {
+    if (castAcc.lines.some(function (l) { return l.desc.indexOf(c) >= 0; })) return;
+    castAcc.lines.push(newLine(c + ' — ' + scene.slug, 1, 1, tier.day, 'sag-principal', 'castDays:' + c));
+    out.castAdded++;
+  });
+  var propsAcc = p.accounts.find(function (a) { return a.code === '2300'; });
+  (scene.props || []).forEach(function (pr) {
+    if (!propsAcc.lines.some(function (l) { return l.desc === pr; })) { propsAcc.lines.push(newLine(pr + ' — ' + scene.slug, 1, 1, 0, 'none')); out.propsAdded++; }
+  });
+  var locAcc = p.accounts.find(function (a) { return a.code === '3100'; });
+  if (scene.location && !locAcc.lines.some(function (l) { return l.desc.indexOf(scene.location) >= 0; })) {
+    locAcc.lines.push(newLine(scene.location + ' — location', 1, 1, 0, 'none'));
+    out.locAdded++;
+  }
+  return out;
+}
+/* Budget-first flow: pre-fill cast / props / locations from the
+   breakdown, shoot days from the schedule (or the draft), location
+   count from distinct breakdown locations. Union rates and math are
+   untouched — this only adds lines and globals. */
+function applyFirstPassBudget(p) {
+  var out = { castAdded: 0, propsAdded: 0, locAdded: 0 };
+  (p.scenes || []).forEach(function (s) {
+    var r = addSceneToBudget(p, s);
+    out.castAdded += r.castAdded; out.propsAdded += r.propsAdded; out.locAdded += r.locAdded;
+  });
+  var days = ((p.schedule || {}).days || []).length || ((p.scheduleDraft && p.scheduleDraft.days) || []).length;
+  if (days) p.globals.shootDays = days;
+  var locs = {};
+  (p.scenes || []).forEach(function (s) { if (s.location) locs[s.location] = true; });
+  var nLoc = Object.keys(locs).length;
+  if (nLoc) p.globals.locations = nLoc;
+  return out;
+}
+
 /* Node test export (browser ignores this block). */
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { UNION_RATES: UNION_RATES, FRINGES: FRINGES, ACCOUNTS: ACCOUNTS, blankProject: blankProject, applyFeatureTemplate: applyFeatureTemplate, lineSubtotal: lineSubtotal, lineFringe: lineFringe, calcBudget: calcBudget, calcBonds: calcBonds, calcFinancing: calcFinancing, calcActuals: calcActuals, calcDOOD: calcDOOD, derivedFromSchedule: derivedFromSchedule, parseScriptText: parseScriptText, buildMMBXML: buildMMBXML, buildCSV: buildCSV, buildTSV: buildTSV, producerProgress: producerProgress, newLine: newLine, money: money };
+  module.exports = { UNION_RATES: UNION_RATES, FRINGES: FRINGES, ACCOUNTS: ACCOUNTS, blankProject: blankProject, applyFeatureTemplate: applyFeatureTemplate, lineSubtotal: lineSubtotal, lineFringe: lineFringe, calcBudget: calcBudget, calcBonds: calcBonds, calcFinancing: calcFinancing, calcActuals: calcActuals, calcDOOD: calcDOOD, derivedFromSchedule: derivedFromSchedule, parseScriptText: parseScriptText, buildMMBXML: buildMMBXML, buildCSV: buildCSV, buildTSV: buildTSV, producerProgress: producerProgress, newLine: newLine, money: money, scenePageEstimate: scenePageEstimate, highlightProps: highlightProps, isScannedPdfText: isScannedPdfText, parseScheduleText: parseScheduleText, proposeScheduleDays: proposeScheduleDays, getLinedScene: getLinedScene, markSceneShot: markSceneShot, toggleSceneShot: toggleSceneShot, setCircledTake: setCircledTake, liningProgress: liningProgress, dprSummary: dprSummary, buildScriptImportReview: buildScriptImportReview, buildScheduleImportReview: buildScheduleImportReview, applyImportReview: applyImportReview, mergePropsFromScenes: mergePropsFromScenes, applyPropsFirstNeeded: applyPropsFirstNeeded, addSceneToBudget: addSceneToBudget, applyFirstPassBudget: applyFirstPassBudget, dateMinus: dateMinus };
 }
 
 /* =====================================================================
@@ -697,7 +1049,7 @@ if (typeof module !== 'undefined' && module.exports) {
    printouts on their tabs instead. True separate dept accounts need a
    backend and are a v2 item (see README).
    ===================================================================== */
-/* Navigation — 6 groups, 13 sections (My Films + the 12 original tabs).
+/* Navigation — 6 groups, 14 sections (My Films + the 12 original tabs + Lined Script).
    No horizontal tab strip: on phone the active group's sections show as a
    wrapping chip row under a 6-button group grid; on desktop the nav is a
    sidebar with every group expanded. Every section is one tap away, no
@@ -707,7 +1059,7 @@ var GROUPS = [
   { id: 'library', label: 'Films', sections: [['films', 'My Films'], ['dashboard', 'Overview']] },
   { id: 'money', label: 'Money', sections: [['budget', 'Budget'], ['rates', 'Union Rates'], ['actuals', 'Actuals & Left'], ['financing', 'Financing & Bonds']] },
   { id: 'script', label: 'Script', sections: [['script', 'Script & Coverage'], ['scenes', 'Scene Pages']] },
-  { id: 'schedule', label: 'Schedule', sections: [['schedule', 'Schedule']] },
+  { id: 'schedule', label: 'Schedule', sections: [['schedule', 'Schedule'], ['lined', 'Lined Script']] },
   { id: 'production', label: 'Production', sections: [['visual', 'Visual Prep'], ['props', 'Props & Sets'], ['crew', 'Crew & Call Sheets']] },
   { id: 'settings', label: 'Settings', sections: [['settings', 'Settings & Export']] }
 ];
@@ -746,7 +1098,7 @@ function renderAll() {
   var v = $('view');
   if (!p) { v.innerHTML = emptyStateFor(currentTab); return; }
   if (currentTab === 'films') { v.innerHTML = viewFilms(); renderCloudAuth(); return; }
-  var fn = { dashboard: viewDashboard, budget: viewBudget, rates: viewRates, actuals: viewActuals, script: viewScript, schedule: viewSchedule, visual: viewVisual, scenes: viewScenes, props: viewProps, crew: viewCrew, financing: viewFinancing, settings: viewSettings }[currentTab] || viewDashboard;
+  var fn = { dashboard: viewDashboard, budget: viewBudget, rates: viewRates, actuals: viewActuals, script: viewScript, schedule: viewSchedule, lined: viewLined, visual: viewVisual, scenes: viewScenes, props: viewProps, crew: viewCrew, financing: viewFinancing, settings: viewSettings }[currentTab] || viewDashboard;
   v.innerHTML = fn(p);
   renderCloudAuth();
 }
@@ -809,6 +1161,7 @@ var EMPTY_STATES = {
   actuals: { title: 'Actuals & Left', body: 'Track what you’ve actually spent, account by account, against the budget.' },
   script: { title: 'Script & Coverage', body: 'Break down the script — scenes, characters, locations, and props — and send them to the budget.' },
   schedule: { title: 'Schedule', body: 'Plan shoot days, build call sheets, and see the Day Out of Days for every cast member.' },
+  lined: { title: 'Lined Script', body: 'On-set lined script for the script supervisor — tap to mark scenes shot, log takes, and feed the Daily Production Report.' },
   visual: { title: 'Visual Prep', body: 'Mood boards, shot lists, and the look for each scene, ready for the DP.' },
   scenes: { title: 'Scene Pages', body: 'One page per scene, with a section for every department.' },
   props: { title: 'Props & Sets', body: 'Props and set pieces — when each one is needed, and whether it’s ready.' },
@@ -831,7 +1184,7 @@ function viewOnboarding() {
     var blurb = {
       money: 'Budget, union rates, actuals, financing and bonds.',
       script: 'Script breakdown and one page per scene.',
-      schedule: 'Shoot days, call sheets, Day Out of Days.',
+      schedule: 'Shoot days, call sheets, Day Out of Days, and the on-set lined script.',
       production: 'Visual prep, props and set pieces, crew.',
       settings: 'Exports, backups, and project settings.'
     }[g.id] || '';
@@ -1012,21 +1365,140 @@ function viewScript(p) {
   var list = scenes.map(function (s, i) {
     return '<div class="card"><h3>Scene ' + (i + 1) + ' — ' + esc(s.slug) + '</h3>' +
       '<p class="muted">' + esc(s.location || '') + (s.dayNight ? ' · ' + esc(s.dayNight) : '') + '</p>' +
-      '<p>' + esc(s.description || '').slice(0, 400) + '</p>' +
+      '<p>' + highlightProps((s.description || '').slice(0, 400), s.props) + '</p>' +
       '<p>Characters: ' + (s.characters || []).map(function (c) { return '<span class="pill">' + esc(c) + '</span>'; }).join(' ') + '</p>' +
       '<p>Props detected: ' + (s.props || []).map(function (x) { return '<span class="pill">' + esc(x) + '</span>'; }).join(' ') + '</p>' +
       '<label>Coverage<textarea data-scene="' + s.id + '" data-sfield="coverage" rows="2" placeholder="Reader coverage — what works, what doesn’t…">' + esc(s.coverage || '') + '</textarea></label>' +
       '<div class="btnrow"><button type="button" class="small" data-action="send-scene-budget" data-id="' + s.id + '">Send cast / props / location to budget</button>' +
-      '<button type="button" class="small" data-action="goto-scene" data-id="' + s.id + '">Open scene page →</button></div></div>';
+      '<button type="button" class="small" data-action="goto-scene" data-id="' + s.id + '">Open scene page →</button>' +
+      '<button type="button" class="small" data-action="goto" data-tab="lined">Lined script →</button></div></div>';
   }).join('');
   return headerFields(p) + '<div class="card"><h2>Script &amp; Coverage</h2>' +
     '<p class="sub">Upload a script (.txt, .fountain, or .fdx) or paste it below. The app drafts a scene breakdown — sluglines, characters, locations, props — which you can fix by hand. Props are detected by keyword and are a starting point, not a guarantee: check every scene.</p>' +
     '<div class="btnrow"><input type="file" id="script-file" accept=".txt,.fountain,.fdx,.xml" class="small">' +
     '<button type="button" class="small primary" data-action="import-script-file">Import file</button></div>' +
+    '<div class="btnrow"><input type="file" id="script-pdf-file" accept=".pdf,application/pdf" class="small">' +
+    '<button type="button" class="small primary" data-action="import-script-pdf">Import script PDF</button></div>' +
+    '<p class="muted">Script PDFs are read in your browser — the file stays on this device, nothing is uploaded. Text-based PDFs (Final Draft, etc.) work; a scanned PDF has no text layer and the app will say so instead of guessing.</p>' +
+    (importNotice ? '<p class="draft-warn">' + esc(importNotice) + '</p>' : '') +
     '<label>Or paste script text<textarea id="script-paste" rows="6" placeholder="INT. KITCHEN — NIGHT&#10;…"></textarea></label>' +
     '<div class="btnrow"><button type="button" class="small primary" data-action="import-script-paste">Parse pasted script</button>' +
     '<button type="button" class="small" data-action="clear-scenes">Clear breakdown</button></div>' +
-    '<p class="muted" id="script-msg">' + scenes.length + ' scenes in the breakdown.</p></div>' + list;
+    '<p class="muted" id="script-msg">' + scenes.length + ' scenes in the breakdown.</p></div>' + importReviewHTML(p) + firstPassBudgetHTML(p) + list;
+}
+
+
+/* ---------------- Import review / AI draft / Lined Script views ---------------- */
+function importReviewHTML(p) {
+  var r = p.pendingImport;
+  if (!r) return '';
+  if (r.kind === 'script') {
+    var items = r.items.map(function (it, i) {
+      var s = it.scene;
+      return '<div class="review-item"><label class="review-keep"><input type="checkbox" data-pending="keep" data-i="' + i + '"' + (it.keep ? ' checked' : '') + '> Keep</label>' +
+        '<input data-pending="slug" data-i="' + i + '" value="' + esc(s.slug) + '" aria-label="Scene heading">' +
+        '<span class="muted">' + esc((s.characters || []).join(', ')) + (s.props && s.props.length ? ' · Props: ' + esc(s.props.join(', ')) : '') + '</span></div>';
+    }).join('');
+    return '<div class="card review-card"><h3>Review the import — nothing is saved yet</h3>' +
+      '<p class="muted">' + r.items.length + ' scene(s) found in the PDF. Untick anything that isn’t a real scene, fix a heading by typing over it, then Approve. Approving replaces the current breakdown, pulls props into the Props tracker, and drafts a first schedule for review.</p>' +
+      items +
+      '<div class="btnrow"><button type="button" class="small primary" data-action="import-review-approve">Approve import</button>' +
+      '<button type="button" class="small ghost" data-action="import-review-discard">Discard</button></div></div>';
+  }
+  var items2 = r.items.map(function (it, i) {
+    var d = it.day;
+    var scs = (d.sceneIds || []).map(function (sid) { var s = (p.scenes || []).find(function (x) { return x.id === sid; }); return s ? s.slug : ''; }).filter(Boolean).join(', ');
+    return '<div class="review-item"><label class="review-keep"><input type="checkbox" data-pending="keep" data-i="' + i + '"' + (it.keep ? ' checked' : '') + '> Keep</label>' +
+      '<input type="date" data-pending="date" data-i="' + i + '" value="' + esc(d.date || '') + '" aria-label="Shoot date">' +
+      '<input data-pending="callTime" data-i="' + i + '" value="' + esc(d.callTime || '') + '" placeholder="Call time" aria-label="Call time">' +
+      '<span class="muted">' + esc(scs || 'No scenes matched') + '</span></div>';
+  }).join('');
+  var warns = (r.warnings || []).map(function (w) { return '<p class="draft-warn">' + esc(w) + '</p>'; }).join('');
+  return '<div class="card review-card"><h3>Review the schedule import — nothing is saved yet</h3>' +
+    '<p class="muted">' + r.items.length + ' shoot day(s) found. Fix a date or call time, untick a day you don’t want, then Approve. Approving replaces the current schedule and sets prop first-needed dates from it.</p>' + warns + items2 +
+    '<div class="btnrow"><button type="button" class="small primary" data-action="import-review-approve">Approve import</button>' +
+    '<button type="button" class="small ghost" data-action="import-review-discard">Discard</button></div></div>';
+}
+function firstPassBudgetHTML(p) {
+  if (!(p.scenes || []).length) return '';
+  var b = calcBudget(p);
+  return '<div class="card"><h3>Next step — first-pass budget</h3>' +
+    '<p class="muted">Budget is usually the first thing you turn around when you’re hired. This pre-fills cast (at the ' + sagTierForBudget(b.grandTotal).tier + ' SAG tier), props and locations from the breakdown, and sets shoot days and location count from the schedule. Review the Budget tab after — nothing here locks anything in.</p>' +
+    '<div class="btnrow"><button type="button" class="small primary" data-action="apply-first-pass-budget">Build first-pass budget</button>' +
+    '<button type="button" class="small" data-action="goto" data-tab="budget">Open Budget</button></div></div>';
+}
+function scheduleImportHTML(p) {
+  return '<div class="card"><h3>Import a schedule PDF</h3>' +
+    '<p class="muted">Upload a shooting schedule as a PDF (text-based). It’s read in your browser — the file stays on this device, nothing is uploaded. A scanned schedule with no text layer will say so plainly instead of guessing.</p>' +
+    '<div class="btnrow"><input type="file" id="sched-pdf-file" accept=".pdf,application/pdf" class="small">' +
+    '<button type="button" class="small primary" data-action="import-schedule-pdf">Import schedule PDF</button></div>' +
+    (importNotice ? '<p class="draft-warn">' + esc(importNotice) + '</p>' : '') + '</div>';
+}
+function scheduleDraftHTML(p) {
+  var dr = p.scheduleDraft;
+  if (!dr) {
+    return '<div class="card"><h3>Draft schedule — your second brain</h3>' +
+      '<p class="muted">From the breakdown, the app drafts shoot days grouped by location and day/night, and flags conflicts (a location split across days, a night shoot after a day shoot). It’s a draft — you review every day before it touches the real schedule.</p>' +
+      '<div class="btnrow"><button type="button" class="small primary" data-action="draft-schedule">Draft schedule from breakdown</button></div></div>';
+  }
+  var days = dr.days.map(function (d, i) {
+    var scs = (d.sceneIds || []).map(function (sid) { var s = (p.scenes || []).find(function (x) { return x.id === sid; }); return s ? s.slug : ''; }).filter(Boolean).join(', ');
+    var warns = (d.warnings || []).map(function (w) { return '<p class="draft-warn">' + esc(w) + '</p>'; }).join('');
+    return '<div class="review-item"><label class="review-keep"><input type="checkbox" data-draft="keep" data-i="' + i + '"' + (d.keep !== false ? ' checked' : '') + '> Keep</label>' +
+      '<span><b>Day ' + (i + 1) + '</b> — ' + esc(d.location || '') + ' · ' + esc(d.dayNight || '') + ' · ' + d.sceneIds.length + ' scene(s)</span>' +
+      '<input type="date" data-draft="date" data-i="' + i + '" value="' + esc(d.date || '') + '" aria-label="Shoot date">' +
+      '<span class="muted">' + esc(scs) + '</span>' + warns + '</div>';
+  }).join('');
+  var warns = (dr.warnings || []).map(function (w) { return '<p class="draft-warn">' + esc(w) + '</p>'; }).join('');
+  return '<div class="card review-card"><h3>Draft schedule — review before it touches the real one</h3>' +
+    '<p class="muted">' + esc(dr.summary || '') + ' Unticked days won’t be added. Set dates where they’re blank, then Approve.</p>' + warns + days +
+    '<div class="btnrow"><button type="button" class="small primary" data-action="draft-approve">Approve draft — build shoot days</button>' +
+    '<button type="button" class="small ghost" data-action="draft-discard">Discard draft</button></div></div>';
+}
+function viewLined(p) {
+  var lp = liningProgress(p);
+  var dpr = dprSummary(p, todayISO());
+  var scenes = p.scenes || [];
+  var cards = scenes.map(function (s, i) {
+    var st = getLinedScene(p, s.id);
+    var text = s.scriptText || s.description || '';
+    var pg = (typeof s.pages === 'number') ? s.pages : scenePageEstimate(s);
+    var takes = (st.takes || []).map(function (t, j) {
+      return '<div class="take-row"><span>Take ' + t.n + ' — ' + esc(t.coverage || '') + (t.note ? ' — ' + esc(t.note) : '') + '</span>' +
+        '<button type="button" class="small' + (t.circled ? ' primary' : '') + '" data-action="line-circle-take" data-id="' + s.id + '" data-i="' + j + '">' + (t.circled ? 'Circled take' : 'Circle take') + '</button>' +
+        '<button type="button" class="small ghost" data-action="line-del-take" data-id="' + s.id + '" data-i="' + j + '">×</button></div>';
+    }).join('');
+    return '<div class="card lined-scene' + (st.shot ? ' is-shot' : '') + '">' +
+      '<h3>Scene ' + (i + 1) + ' — ' + esc(s.slug) + ' <span class="shot-pill' + (st.shot ? ' shot' : '') + '">' + (st.shot ? 'SHOT' : 'NOT SHOT') + '</span></h3>' +
+      '<p class="muted">' + esc(s.location || '') + (s.dayNight ? ' · ' + esc(s.dayNight) : '') + ' · ' + pg + ' page(s) · Characters: ' + esc((s.characters || []).join(', ')) + '</p>' +
+      '<div class="lined-text">' + highlightProps(text, s.props) + '</div>' +
+      '<p class="muted">Props in this scene: ' + esc((s.props || []).join(', ') || '—') + '</p>' +
+      '<div class="btnrow"><button type="button" class="lined-shot-btn ' + (st.shot ? '' : 'primary') + '" data-action="' + (st.shot ? 'line-undo-shot' : 'line-mark-shot') + '" data-id="' + s.id + '">' + (st.shot ? 'Undo — mark not shot' : 'Mark shot') + '</button></div>' +
+      '<div class="grid3"><label>Coverage<select id="line-cov-' + s.id + '">' + ['Wide', 'Medium', 'Close-up', 'Insert', 'Over-the-shoulder', 'Establishing', 'Two-shot'].map(function (c) { return '<option>' + c + '</option>'; }).join('') + '</select></label>' +
+      '<label>Take no.<input type="number" id="line-take-' + s.id + '" value="' + (st.takes.length + 1) + '"></label>' +
+      '<label class="check"><input type="checkbox" id="line-circ-' + s.id + '"> Circled take</label></div>' +
+      '<label>Take note<input id="line-note-' + s.id + '" placeholder="e.g. great performance, boom in frame"></label>' +
+      '<div class="btnrow"><button type="button" class="small primary" data-action="line-add-take" data-id="' + s.id + '">＋ Add take</button></div>' +
+      takes +
+      '<label>Continuity note<textarea data-lined="' + s.id + '" data-lfield="continuity" rows="2" placeholder="Continuity — wardrobe, props, hair, position…">' + esc(st.continuity || '') + '</textarea></label>' +
+      '<label>Script supervisor note<textarea data-lined="' + s.id + '" data-lfield="note" rows="2" placeholder="Anything the editor or the DPR needs to know…">' + esc(st.note || '') + '</textarea></label>' +
+      '<div class="btnrow"><label class="check"><input type="checkbox" data-lined="' + s.id + '" data-lfield="adr"' + (st.adr ? ' checked' : '') + '> ADR needed</label>' +
+      '<label class="check"><input type="checkbox" data-lined="' + s.id + '" data-lfield="wild"' + (st.wild ? ' checked' : '') + '> Wild line</label></div>' +
+      '</div>';
+  }).join('');
+  return headerFields(p) + '<div class="card"><h2>On Set — Lined Script</h2>' +
+    '<p class="sub">For the script supervisor, on iPad. Tap <b>Mark shot</b> when a scene is in the can — tap again to undo. Add takes with coverage, circle the best one, and jot continuity, ADR and wild-line notes in plain text. No drawing tools in v1 — if you want to line by hand later, that’s a follow-up. Everything here is saved on this device and works offline on set. Nothing auto-publishes — review the Daily Production Report below before you share it.</p>' +
+    '<div class="grid4"><div><div class="kpi-label">Scenes shot</div><div class="kpi">' + lp.scenesShot + ' / ' + lp.scenesTotal + '</div></div>' +
+    '<div><div class="kpi-label">Pages shot</div><div class="kpi">' + lp.pagesShot + ' / ' + lp.pagesTotal + '</div></div>' +
+    '<div><div class="kpi-label">Setups (takes)</div><div class="kpi">' + lp.takesTotal + '</div></div>' +
+    '<div><div class="kpi-label">Circled takes</div><div class="kpi">' + lp.circledTotal + '</div></div></div></div>' +
+    '<div class="card"><h3>Daily Production Report — today (' + fmtDate(dpr.date) + ')</h3>' +
+    (dpr.hasShootDay
+      ? '<p>Shoot day: ' + esc(dpr.location || '') + ' · Call ' + esc(dpr.callTime || '—') + '<br>Scenes scheduled ' + dpr.scenesScheduled + ' · Scenes shot ' + dpr.scenesShotToday + ' · Pages shot ' + dpr.pagesShotToday + ' · Setups ' + dpr.setupsToday + '<br>Circled takes: ' + (dpr.circledToday.join(', ') || '—') + '<br>ADR flags: ' + lp.adrCount + ' scene(s) · Wild lines: ' + lp.wildCount + ' scene(s)</p>'
+      : '<p class="muted">No shoot day scheduled for today. Overall: ' + lp.scenesShot + ' of ' + lp.scenesTotal + ' scenes shot, ' + lp.pagesShot + ' of ' + lp.pagesTotal + ' pages, ' + lp.takesTotal + ' takes, ' + lp.circledTotal + ' circled.</p>') +
+    '<div class="btnrow"><button type="button" class="small" data-action="goto" data-tab="schedule">Open Schedule</button>' +
+    '<button type="button" class="small" data-action="preview-pdf">Preview / PDF</button></div></div>' +
+    (cards || '<div class="card"><p class="muted">No scenes yet — import a script on the Script &amp; Coverage tab first.</p></div>');
 }
 
 /* ---------------- Schedule / DOOD / Call sheets ---------------- */
@@ -1041,6 +1513,7 @@ function viewSchedule(p) {
       '<p>Scenes: ' + (scs.join(', ') || '—') + '</p>' +
       '<p>Props / set pieces today: ' + (propsToday.map(function (x) { return esc(x.name); }).join(', ') || '—') + '</p>' +
       '<div class="btnrow"><button type="button" class="small" data-action="call-sheet" data-i="' + i + '">Call sheet</button>' +
+      '<button type="button" class="small" data-action="goto" data-tab="lined">Lined script</button>' +
       '<button type="button" class="small ghost" data-action="del-day" data-i="' + i + '">Remove day</button></div></div>';
   }).join('');
   var doodHead = '<tr><th>Cast</th><th>Days</th>' + days.map(function (d, i) { return '<th>' + (i + 1) + '<br><span class="muted">' + (d.date || '').slice(5) + '</span></th>'; }).join('') + '</tr>';
@@ -1052,6 +1525,7 @@ function viewSchedule(p) {
   }).join('');
   return headerFields(p) + '<div class="card"><h2>Schedule — Stripboard</h2>' +
     '<p class="sub">Build shoot days from your breakdown scenes. Changing the schedule reprices the budget: shoot days, cast days per character, and location days all feed linked budget lines. S = start, W = work, F = finish, H = hold, S/F = one-day only.</p>' +
+    scheduleImportHTML(p) + importReviewHTML(p) + scheduleDraftHTML(p) +
     '<div class="grid3"><label>Start date<input type="date" id="sched-start" value="' + esc(p.schedule.startDate || '') + '"></label>' +
     '<label>New day — date<input type="date" id="sched-date" value="' + todayISO() + '"></label>' +
     '<label>Call time<input id="sched-call" placeholder="e.g. 7:00 AM"></label></div>' +
@@ -1144,6 +1618,7 @@ function viewProps(p) {
   }).join('');
   return headerFields(p) + '<div class="card"><h2>Props &amp; Set Pieces</h2>' +
     '<p class="sub">First-needed date, prep-by date, department, status. When a prop is needed on a shoot day, it shows on that day’s call sheet.</p>' +
+    '<p class="muted">First-needed dates fill in automatically when you approve a schedule (or a schedule draft) — each prop takes the earliest shoot day that needs one of its scenes. Prep-by defaults to two days before that.</p>' +
     '<div class="grid3"><label>Name<input id="prop-name" placeholder="e.g. Hero revolver"></label>' +
     '<label>Department<select id="prop-dept">' + DEPTS.map(function (d) { return '<option>' + d + '</option>'; }).join('') + '</select></label>' +
     '<label>Prep by<input type="date" id="prop-prep"></label></div>' +
@@ -1246,6 +1721,87 @@ function doPreview() {
   window.print();
 }
 
+
+/* ---------------- PDF text extraction (browser only) ---------------- */
+/* pdf.js is VENDORED at vendor/pdfjs/ (Mozilla, Apache 2.0) — no CDN,
+   no server, no upload. The PDF is read on the device and the file
+   never leaves it. Loaded on demand the first time a PDF is imported,
+   so the app still works offline once the files are in the browser
+   cache — and on set, the lined script needs no network at all. */
+var pdfJsPromise = null;
+var importNotice = '';
+function loadPdfJs() {
+  if (typeof window !== 'undefined' && window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (pdfJsPromise) return pdfJsPromise;
+  pdfJsPromise = new Promise(function (resolve, reject) {
+    var s = document.createElement('script');
+    s.src = 'vendor/pdfjs/pdf.min.js';
+    s.onload = function () {
+      try {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdfjs/pdf.worker.min.js';
+        resolve(window.pdfjsLib);
+      } catch (e) { reject(e); }
+    };
+    s.onerror = function () { reject(new Error('PDF reader failed to load')); };
+    document.head.appendChild(s);
+  });
+  return pdfJsPromise;
+}
+function extractPdfText(buf) {
+  return loadPdfJs().then(function (pdfjsLib) {
+    /* Real browsers have a Worker API and pdf.js parses off the main
+       thread. Environments without one (jsdom, some embedded webviews)
+       run the same parse on the main thread instead of failing on
+       worker setup — same text out, same no-text rule. */
+    return pdfjsLib.getDocument({ data: buf, disableWorker: typeof Worker === 'undefined' }).promise;
+  }).then(function (doc) {
+    var pages = doc.numPages, out = [], i = 1;
+    function next() {
+      if (i > pages) return { text: out.join('\n'), pages: pages, noText: isScannedPdfText(out.join('\n'), pages) };
+      return doc.getPage(i++).then(function (page) {
+        return page.getTextContent().then(function (tc) {
+          var line = '', lastY = null;
+          tc.items.forEach(function (it) {
+            if (lastY !== null && Math.abs(it.transform[5] - lastY) > 2) line += '\n';
+            line += it.str + ' ';
+            lastY = it.transform[5];
+          });
+          out.push(line);
+          return next();
+        });
+      });
+    }
+    return next();
+  });
+}
+function handlePdfImport(file, kind) {
+  var p = currentProject(); if (!p || !file) return;
+  importNotice = '';
+  var reader = new FileReader();
+  reader.onload = function () {
+    extractPdfText(new Uint8Array(reader.result)).then(function (res) {
+      if (res.noText) {
+        importNotice = 'This PDF has no readable text — it’s a scan. The app can’t read a scanned page; use a text-based export (Final Draft → Save as PDF) or paste the script text instead. Nothing was imported.';
+        renderAll(); return;
+      }
+      if (kind === 'script') {
+        var scenes = parseScriptText(res.text);
+        if (!scenes.length) { importNotice = 'No scenes found in this PDF — check it’s a screenplay with INT./EXT. scene headings.'; renderAll(); return; }
+        p.pendingImport = buildScriptImportReview(scenes);
+      } else {
+        var parsed = parseScheduleText(res.text, p.scenes);
+        if (!parsed.days.length) { importNotice = 'No shoot days found in this PDF — check it’s a shooting schedule with day headers and scene numbers.'; renderAll(); return; }
+        p.pendingImport = buildScheduleImportReview(parsed);
+      }
+      save(); setTab(kind === 'script' ? 'script' : 'schedule');
+    }).catch(function () {
+      importNotice = 'Couldn’t read that PDF in this browser. Try a text-based PDF export, or paste the text instead.';
+      renderAll();
+    });
+  };
+  reader.readAsArrayBuffer(file);
+}
+
 /* ---------------- events + init ---------------- */
 function findLine(id) {
   var p = currentProject(); if (!p) return null;
@@ -1260,19 +1816,7 @@ function applySagTier(day) {
 }
 function sendSceneToBudget(scene) {
   var p = currentProject(); if (!p) return;
-  var b = calcBudget(p);
-  var tier = sagTierForBudget(b.grandTotal);
-  var castAcc = p.accounts.find(function (a) { return a.code === '1400'; });
-  (scene.characters || []).forEach(function (c) {
-    if (castAcc.lines.some(function (l) { return l.desc.indexOf(c) >= 0; })) return;
-    castAcc.lines.push(newLine(c + ' — ' + scene.slug, 1, 1, tier.day, 'sag-principal', 'castDays:' + c));
-  });
-  var propsAcc = p.accounts.find(function (a) { return a.code === '2300'; });
-  (scene.props || []).forEach(function (pr) {
-    if (!propsAcc.lines.some(function (l) { return l.desc === pr; })) propsAcc.lines.push(newLine(pr + ' — ' + scene.slug, 1, 1, 0, 'none'));
-  });
-  var locAcc = p.accounts.find(function (a) { return a.code === '3100'; });
-  if (scene.location && !locAcc.lines.some(function (l) { return l.desc.indexOf(scene.location) >= 0; })) locAcc.lines.push(newLine(scene.location + ' — location', 1, 1, 0, 'none'));
+  addSceneToBudget(p, scene);
   save(); renderAll();
 }
 function handleAction(act, el) {
@@ -1317,6 +1861,40 @@ function handleAction(act, el) {
     };
     r.readAsText(f); return;
   }
+  if (act === 'import-script-pdf') {
+    var pf = $('script-pdf-file').files && $('script-pdf-file').files[0];
+    if (!pf) { importNotice = 'Choose a script PDF first.'; renderAll(); return; }
+    handlePdfImport(pf, 'script'); return;
+  }
+  if (act === 'import-schedule-pdf') {
+    var sf = $('sched-pdf-file').files && $('sched-pdf-file').files[0];
+    if (!sf) { importNotice = 'Choose a schedule PDF first.'; renderAll(); return; }
+    handlePdfImport(sf, 'schedule'); return;
+  }
+  if (act === 'import-review-approve') { applyImportReview(p, p.pendingImport); save(); renderAll(); return; }
+  if (act === 'import-review-discard') { p.pendingImport = null; save(); renderAll(); return; }
+  if (act === 'draft-schedule') {
+    p.scheduleDraft = proposeScheduleDays(p.scenes || [], (p.schedule && p.schedule.startDate) || '');
+    save(); renderAll(); return;
+  }
+  if (act === 'draft-approve') {
+    var kept = (p.scheduleDraft.days || []).filter(function (d) { return d.keep !== false; });
+    p.schedule.days = kept.map(function (d) { return { id: uid(), date: d.date || '', callTime: d.callTime || '7:00 AM', location: d.location || '', sceneIds: d.sceneIds || [], notes: '' }; });
+    p.scheduleDraft = null;
+    applyPropsFirstNeeded(p);
+    save(); renderAll(); return;
+  }
+  if (act === 'draft-discard') { p.scheduleDraft = null; save(); renderAll(); return; }
+  if (act === 'apply-first-pass-budget') { applyFirstPassBudget(p); save(); setTab('budget'); return; }
+  if (act === 'line-mark-shot') { markSceneShot(p, id, { n: 1, coverage: 'Wide' }); save(); renderAll(); return; }
+  if (act === 'line-undo-shot') { var ls0 = getLinedScene(p, id); ls0.takes = []; ls0.shot = false; save(); renderAll(); return; }
+  if (act === 'line-add-take') {
+    var cov = $('line-cov-' + id), tn = $('line-take-' + id), cc = $('line-circ-' + id), nn = $('line-note-' + id);
+    markSceneShot(p, id, { n: tn ? num(tn.value, getLinedScene(p, id).takes.length + 1) : undefined, coverage: cov ? cov.value : 'Wide', circled: !!(cc && cc.checked), note: nn ? nn.value : '' });
+    save(); renderAll(); return;
+  }
+  if (act === 'line-del-take') { var ls2 = getLinedScene(p, id); ls2.takes.splice(num(el.getAttribute('data-i'), 0), 1); if (!ls2.takes.length) ls2.shot = false; save(); renderAll(); return; }
+  if (act === 'line-circle-take') { setCircledTake(p, id, num(el.getAttribute('data-i'), 0)); save(); renderAll(); return; }
   if (act === 'clear-scenes') { if (confirm('Clear the breakdown? Scenes, shots and look notes go with it.')) { p.scenes = []; save(); renderAll(); } return; }
   if (act === 'send-scene-budget') { var sc1 = p.scenes.find(function (s) { return s.id === id; }); if (sc1) sendSceneToBudget(sc1); return; }
   if (act === 'goto-scene') { setTab('scenes'); var el2 = document.querySelector('[data-scene="' + id + '"]'); if (el2) el2.scrollIntoView(); return; }
@@ -1434,6 +2012,36 @@ function handleFieldChange(el) {
     else if (sf && sf.indexOf('look.') === 0) sc.look[sf.slice(5)] = el.value;
     save(); return;
   }
+  var linedId = el.getAttribute('data-lined');
+  if (linedId && p) {
+    var lst = getLinedScene(p, linedId);
+    var lf2 = el.getAttribute('data-lfield');
+    if (lf2 === 'adr' || lf2 === 'wild') lst[lf2] = !!el.checked;
+    else if (lf2) lst[lf2] = el.value;
+    save(); return;
+  }
+  var pendKind = el.getAttribute('data-pending');
+  if (pendKind && p && p.pendingImport) {
+    var pit = p.pendingImport.items[num(el.getAttribute('data-i'), 0)];
+    if (pit) {
+      if (pendKind === 'keep') pit.keep = !!el.checked;
+      else if (pendKind === 'slug' && pit.scene) pit.scene.slug = el.value.toUpperCase();
+      else if (pendKind === 'date' && pit.day) pit.day.date = el.value;
+      else if (pendKind === 'callTime' && pit.day) pit.day.callTime = el.value;
+      save();
+    }
+    return;
+  }
+  var draftKind = el.getAttribute('data-draft');
+  if (draftKind && p && p.scheduleDraft) {
+    var dd = p.scheduleDraft.days[num(el.getAttribute('data-i'), 0)];
+    if (dd) {
+      if (draftKind === 'keep') dd.keep = !!el.checked;
+      else if (draftKind === 'date') dd.date = el.value;
+      save();
+    }
+    return;
+  }
   var propId = el.getAttribute('data-prop');
   if (propId && p) {
     var pr = p.props.find(function (x) { return x.id === propId; }); if (!pr) return;
@@ -1490,11 +2098,11 @@ function init() {
       r.readAsText(el.files[0]); return;
     }
     if (el.id === 'sched-start' && currentProject()) { currentProject().schedule.startDate = el.value; save(); return; }
-    if (el.matches('[data-field], [data-global], [data-line], [data-bond], [data-scene], [data-prop]')) handleFieldChange(el);
+    if (el.matches('[data-field], [data-global], [data-line], [data-bond], [data-scene], [data-prop], [data-lined], [data-pending], [data-draft]')) handleFieldChange(el);
   });
   document.addEventListener('input', function (e) {
     var el = e.target;
-    if (el.matches('[data-field], [data-scene]')) handleFieldChange(el);
+    if (el.matches('[data-field], [data-scene], [data-lined], [data-pending], [data-draft]')) handleFieldChange(el);
   });
   document.addEventListener('visibilitychange', function () { if (!document.hidden) recheckCloud(); });
   window.addEventListener('focus', function () { recheckCloud(); });
