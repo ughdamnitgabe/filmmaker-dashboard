@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Script Builder — clapperboard</title>
+  <!-- Green rounded square, app accent #1f5c3d (same green as the header). -->
+  <rect x="0" y="0" width="512" height="512" rx="96" fill="#1f5c3d"/>
+  <!-- Clapper bar: white, hinged at the left (104,196), tilted open -7 deg,
+       with diagonal green slats. -->
+  <defs>
+    <clipPath id="barClip" clipPathUnits="userSpaceOnUse">
+      <rect x="88" y="140" width="336" height="52" rx="10"/>
+    </clipPath>
+  </defs>
+  <g transform="rotate(-7 104 196)">
+    <rect x="88" y="140" width="336" height="52" rx="10" fill="#ffffff"/>
+    <g clip-path="url(#barClip)" fill="#1f5c3d">
+      <polygon points="96,140 136,140 108,192 68,192"/>
+      <polygon points="184,140 224,140 196,192 156,192"/>
+      <polygon points="272,140 312,140 284,192 244,192"/>
+      <polygon points="360,140 400,140 372,192 332,192"/>
+    </g>
+  </g>
+  <!-- Board body: white, with three green lines suggesting script lines. -->
+  <rect x="88" y="200" width="336" height="172" rx="16" fill="#ffffff"/>
+  <rect x="116" y="244" width="280" height="16" rx="8" fill="#1f5c3d"/>
+  <rect x="116" y="286" width="280" height="16" rx="8" fill="#1f5c3d"/>
+  <rect x="116" y="328" width="280" height="16" rx="8" fill="#1f5c3d"/>
+  <!-- Hinge pin where the clapper meets the board. -->
+  <circle cx="104" cy="196" r="11" fill="#1f5c3d"/>
+</svg>
